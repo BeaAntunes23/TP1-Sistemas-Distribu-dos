@@ -1,85 +1,61 @@
 ﻿using System.Net.Sockets;
 using System.Text;
 
-// --- CONFIGURAÇÕES INICIAIS ---
+
 string sensorId = "S102";
-int porta = 12345;
+string zona = "ZONA_ESCOLAR"; 
+int portaGateway = 5000;    
 bool isRunning = true;
 
-Console.Write("Introduza o IP do Gateway (ex: 127.0.0.1): ");
-string? gatewayIP = Console.ReadLine();
-
-if (string.IsNullOrEmpty(gatewayIP)) return;
+Console.Write("IP do Gateway (ex: 127.0.0.1): ");
+string? gatewayIP = Console.ReadLine() ?? "127.0.0.1";
 
 try
 {
-    // 1. ESTABELECER LIGAÇÃO
-    using TcpClient client = new TcpClient(gatewayIP, porta);
+    using TcpClient client = new TcpClient(gatewayIP, portaGateway);
     using NetworkStream stream = client.GetStream();
-    Console.WriteLine($"\n[CONECTADO] Ligado ao Gateway em {gatewayIP}:{porta}");
+    using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
+    using StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
 
-    // 2. IDENTIFICAÇÃO E REGISTO
-    string regMsg = $"REGISTER;{sensorId};PM2.5|RUIDO|TEMP";
-    SendMessage(stream, regMsg);
+    Console.WriteLine($"\n[CONECTADO] Porta {portaGateway}");
 
-    // 3. THREAD PARA HEARTBEAT (A cada 10s)
-    Thread hbThread = new Thread(() =>
+
+    string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP";
+    await writer.WriteLineAsync(regMsg);
+    string? resReg = await reader.ReadLineAsync();
+    Console.WriteLine($"[GATEWAY]: {resReg}");
+
+    _ = Task.Run(async () =>
     {
         while (isRunning)
         {
-            Thread.Sleep(10000);
-            if (isRunning) SendMessage(stream, $"HB;{sensorId}");
+            await Task.Delay(10000);
+            if (isRunning) await writer.WriteLineAsync($"HEARTBEAT|{sensorId}");
         }
     });
-    hbThread.IsBackground = true;
-    hbThread.Start();
 
-    // 4. INTERFACE DE TEXTO (SIMULAÇÃO)
+    // 3. MENU DE SIMULAÇÃO
     while (isRunning)
     {
-        Console.WriteLine($"\n--- MENU SENSOR ({sensorId}) ---");
-        Console.WriteLine("1. Enviar PM2.5 (Ex: 78)");
-        Console.WriteLine("2. Enviar Ruído (Ex: 72)");
-        Console.WriteLine("3. Enviar Temperatura");
-        Console.WriteLine("0. Sair");
-        Console.Write("Escolha uma opção: ");
-
+        Console.WriteLine("\n1. Enviar PM2.5 (78)\n2. Enviar Temperatura (20)\n0. Sair");
         string? opcao = Console.ReadLine();
-        string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
 
         switch (opcao)
         {
             case "1":
-                SendMessage(stream, $"DATA;{sensorId};PM2.5;78;{timestamp}");
+                await writer.WriteLineAsync($"DATA|{sensorId}|{zona}|PM2.5|78");
                 break;
             case "2":
-                SendMessage(stream, $"DATA;{sensorId};RUIDO;72;{timestamp}");
-                break;
-            case "3":
-                SendMessage(stream, $"DATA;{sensorId};TEMP;20;{timestamp}");
+                await writer.WriteLineAsync($"DATA|{sensorId}|{zona}|TEMP|20");
                 break;
             case "0":
-                SendMessage(stream, $"QUIT;{sensorId}");
+                await writer.WriteLineAsync("BYE"); 
                 isRunning = false;
                 break;
-            default:
-                Console.WriteLine("Opção inválida.");
-                break;
         }
-    }
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"[ERRO] Não foi possível ligar ao Gateway: {ex.Message}");
-}
 
-void SendMessage(NetworkStream stream, string message)
-{
-    try
-    {
-        byte[] buffer = Encoding.UTF8.GetBytes(message);
-        stream.Write(buffer, 0, buffer.Length);
-        Console.WriteLine($"[ENVIADO] {message}");
+        string? resposta = await reader.ReadLineAsync();
+        Console.WriteLine($"[GATEWAY]: {resposta}");
     }
-    catch { Console.WriteLine("[ERRO] Falha ao enviar mensagem."); }
 }
+catch (Exception ex) { Console.WriteLine($"Erro: {ex.Message}"); }
