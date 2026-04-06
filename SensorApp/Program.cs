@@ -1,10 +1,9 @@
 ﻿using System.Net.Sockets;
 using System.Text;
 
-
 string sensorId = "S102";
-string zona = "ZONA_ESCOLAR"; 
-int portaGateway = 5000;    
+string zona = "ZONA_ESCOLAR";
+int portaGateway = 5000;
 bool isRunning = true;
 
 Console.Write("IP do Gateway (ex: 127.0.0.1): ");
@@ -19,43 +18,79 @@ try
 
     Console.WriteLine($"\n[CONECTADO] Porta {portaGateway}");
 
-
-    string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP";
+    [cite_start]// 1. REGISTO: Identificar-se e indicar tipos de dados [cite: 45, 46]
+    string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP,RUIDO";
     await writer.WriteLineAsync(regMsg);
+
     string? resReg = await reader.ReadLineAsync();
     Console.WriteLine($"[GATEWAY]: {resReg}");
 
+    [cite_start]// 2. HEARTBEAT: Tarefa em segundo plano [cite: 49, 51]
     _ = Task.Run(async () =>
     {
         while (isRunning)
         {
-            await Task.Delay(10000);
-            if (isRunning) await writer.WriteLineAsync($"HEARTBEAT|{sensorId}");
+            try
+            {
+                [cite_start] await Task.Delay(10000); // Envia a cada 10 segundos [cite: 52]
+                if (isRunning)
+                {
+                    await writer.WriteLineAsync($"HEARTBEAT|{sensorId}");
+                }
+            }
+            catch { break; }
         }
     });
 
-    // 3. MENU DE SIMULAÇÃO
+    [cite_start]// 3. INTERFACE DE SIMULAÇÃO [cite: 53]
+    Console.WriteLine("\n--- Simulação de Sensor (One Health) ---");
+    Console.WriteLine("Comandos: TIPO:VALOR | VIDEO | SAIR");
+
     while (isRunning)
     {
-        Console.WriteLine("\n1. Enviar PM2.5 (78)\n2. Enviar Temperatura (20)\n0. Sair");
-        string? opcao = Console.ReadLine();
+        string? input = Console.ReadLine();
+        if (string.IsNullOrEmpty(input)) continue;
 
-        switch (opcao)
+        string cmd = input.ToUpper();
+
+        [cite_start]// Verificação de saída [cite: 50]
+        if (cmd == "SAIR")
         {
-            case "1":
-                await writer.WriteLineAsync($"DATA|{sensorId}|{zona}|PM2.5|78");
-                break;
-            case "2":
-                await writer.WriteLineAsync($"DATA|{sensorId}|{zona}|TEMP|20");
-                break;
-            case "0":
-                await writer.WriteLineAsync("BYE"); 
-                isRunning = false;
-                break;
+            isRunning = false;
+            await writer.WriteLineAsync($"QUIT|{sensorId}");
+            break;
         }
 
-        string? resposta = await reader.ReadLineAsync();
-        Console.WriteLine($"[GATEWAY]: {resposta}");
+        [cite_start]// Envio de necessidade de stream de vídeo [cite: 48]
+        if (cmd == "VIDEO")
+        {
+            string videoMsg = $"STREAM_REQ|{sensorId}|VIDEO_START|{DateTime.Now:s}";
+            await writer.WriteLineAsync(videoMsg);
+            Console.WriteLine($"[SOLICITAÇÃO]: {videoMsg}");
+            continue;
+        }
+
+        [cite_start]// Envio de medições ambientais (FORA do bloco VIDEO) [cite: 47]
+        string[] parts = input.Split(':');
+        if (parts.Length == 2)
+        {
+            string tipo = parts[0].Trim().ToUpper();
+            string valor = parts[1].Trim();
+            string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
+
+            [cite_start]// Formatação: DATA|ID|TIPO|VALOR|TIMESTAMP [cite: 26, 32, 33]
+            string dataMsg = $"DATA|{sensorId}|{tipo}|{valor}|{timestamp}";
+            await writer.WriteLineAsync(dataMsg);
+            Console.WriteLine($"[ENVIADO]: {dataMsg}");
+        }
+        else
+        {
+            Console.WriteLine("Formato inválido. Use 'TIPO:VALOR' ou 'VIDEO'.");
+        }
     }
 }
-catch (Exception ex) { Console.WriteLine($"Erro: {ex.Message}"); }
+catch (Exception ex)
+{
+    Console.WriteLine($"[ERRO DE LIGAÇÃO]: {ex.Message}");
+    isRunning = false;
+}
