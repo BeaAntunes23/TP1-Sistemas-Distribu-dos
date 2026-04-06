@@ -45,58 +45,59 @@ namespace Gateway
         }
 
         static void CarregarSensores(string ficheiroCsv)
+    {
+        sensores.Clear();
+
+        if (!File.Exists(ficheiroCsv))
         {
-            sensores.Clear();
-
-            if (!File.Exists(ficheiroCsv))
-            {
-                Console.WriteLine("Ficheiro CSV não encontrado. A criar exemplo...");
-                File.WriteAllLines(ficheiroCsv, new[]
-                {
-                    "sensor_id:estado:zona:[tipos_dados]:last_sync",
-                    "S101:ativo:ZONA_CENTRO:[TEMP,HUM,RUIDO]:-",
-                    "S102:ativo:ZONA_ESCOLAR:[PM2.5,TEMP]:-",
-                    "S103:manutencao:ZONA_INDUSTRIAL:[AR,PM10]:-"
-                });
-            }
-
-            var linhas = File.ReadAllLines(ficheiroCsv);
-
-            foreach (var linha in linhas.Skip(1))
-            {
-                if (string.IsNullOrWhiteSpace(linha))
-                    continue;
-
-                string[] partes = linha.Split(':');
-                if (partes.Length < 5)
-                    continue;
-
-                string id = partes[0];
-                string estado = partes[1];
-                string zona = partes[2];
-                string tiposRaw = partes[3].Trim('[', ']');
-                string lastSync = string.Join(":", partes.Skip(4));
-
-                sensores[id] = new SensorInfo
-                {
-                    Id = id,
-                    Estado = estado,
-                    Zona = zona,
-                    TiposDados = tiposRaw.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                                         .Select(t => t.Trim())
-                                         .ToList(),
-                    LastSync = lastSync
-                };
-            }
+            Console.WriteLine("Ficheiro CSV não encontrado. A criar exemplo...");
+            Console.WriteLine("Confirme se o Ficheiro CS existe e se o caminho está correto.");
+            //Teste inicial, pode ser removido depois
+            /* File.WriteAllLines(ficheiroCsv, new[]
+             {
+             "sensor_id:estado:zona:[tipos_dados]:last_sync",
+             "S101:ativo:ZONA_CENTRO:[TEMP,HUM,RUIDO]:-",
+             "S102:ativo:ZONA_ESCOLAR:[PM2.5,TEMP]:-",
+             "S103:manutencao:ZONA_INDUSTRIAL:[AR,PM10]:-"
+             });*/
         }
+    
+        var linhas = File.ReadAllLines(ficheiroCsv);
 
+        foreach (var linha in linhas.Skip(1)) //lembrar de colocar skip(0) caso nao tenha header
+        {
+            if (string.IsNullOrWhiteSpace(linha))
+                continue;
+
+            string[] partes = linha.Split(':');
+            if (partes.Length < 5)
+                continue;
+    
+            string id = partes[0];
+            string estado = partes[1];
+            string zona = partes[2];
+            string tiposRaw = partes[3].Trim('[', ']');
+            string lastSync = string.Join(":", partes.Skip(4));
+    
+            sensores[id] = new SensorInfo
+            {
+                Id = id,
+                Estado = estado,
+                Zona = zona,
+                TiposDados = tiposRaw.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                     .Select(t => t.Trim())
+                                     .ToList(),
+                LastSync = lastSync
+            };
+        }
+    }
         static void GuardarSensores(string ficheiroCsv)
         {
             lock (fileLock)
             {
                 var linhas = new List<string>
                 {
-                    "sensor_id:estado:zona:[tipos_dados]:last_sync"
+                    "sensor_id:estado:zona:[tipos_dados]:last_sync" //verificar se o header é necessário ou se deve ser removido 
                 };
 
                 foreach (var s in sensores.Values.OrderBy(x => x.Id))
