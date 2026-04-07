@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GatewayProtocolo")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0285ddf24d7c2c889dbfd0fef94e05d4d2adfde0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+59d58033c31cae0d4e7525a805e73a50a175d7ad")]
 [assembly: System.Reflection.AssemblyProductAttribute("GatewayProtocolo")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GatewayProtocolo")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

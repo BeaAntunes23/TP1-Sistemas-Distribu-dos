@@ -1,4 +1,5 @@
-﻿using System.Net.Sockets;
+﻿using System;
+using System.Net.Sockets;
 using System.Text;
 
 string sensorId = "S102";
@@ -18,21 +19,21 @@ try
 
     Console.WriteLine($"\n[CONECTADO] Porta {portaGateway}");
 
-    [cite_start]// 1. REGISTO: Identificar-se e indicar tipos de dados [cite: 45, 46]
+    // 1. REGISTO: Identificar-se e indicar tipos de dados
     string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP,RUIDO";
     await writer.WriteLineAsync(regMsg);
 
     string? resReg = await reader.ReadLineAsync();
     Console.WriteLine($"[GATEWAY]: {resReg}");
 
-    [cite_start]// 2. HEARTBEAT: Tarefa em segundo plano [cite: 49, 51]
+    // 2. HEARTBEAT: Tarefa em segundo plano
     _ = Task.Run(async () =>
     {
         while (isRunning)
         {
             try
             {
-                [cite_start] await Task.Delay(10000); // Envia a cada 10 segundos [cite: 52]
+                await Task.Delay(10000); // Envia a cada 10 segundos
                 if (isRunning)
                 {
                     await writer.WriteLineAsync($"HEARTBEAT|{sensorId}");
@@ -42,7 +43,7 @@ try
         }
     });
 
-    [cite_start]// 3. INTERFACE DE SIMULAÇÃO [cite: 53]
+    // 3. INTERFACE DE SIMULAÇÃO
     Console.WriteLine("\n--- Simulação de Sensor (One Health) ---");
     Console.WriteLine("Comandos: TIPO:VALOR | VIDEO | SAIR");
 
@@ -53,15 +54,15 @@ try
 
         string cmd = input.ToUpper();
 
-        [cite_start]// Verificação de saída [cite: 50]
+        // Verificação de saída
         if (cmd == "SAIR")
         {
             isRunning = false;
-            await writer.WriteLineAsync($"QUIT|{sensorId}");
+            await writer.WriteLineAsync($"BYE|{sensorId}");
             break;
         }
 
-        [cite_start]// Envio de necessidade de stream de vídeo [cite: 48]
+        // Envio de necessidade de stream de vídeo
         if (cmd == "VIDEO")
         {
             string videoMsg = $"STREAM_REQ|{sensorId}|VIDEO_START|{DateTime.Now:s}";
@@ -70,7 +71,7 @@ try
             continue;
         }
 
-        [cite_start]// Envio de medições ambientais (FORA do bloco VIDEO) [cite: 47]
+        // Envio de medições ambientais
         string[] parts = input.Split(':');
         if (parts.Length == 2)
         {
@@ -78,10 +79,18 @@ try
             string valor = parts[1].Trim();
             string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
 
-            [cite_start]// Formatação: DATA|ID|TIPO|VALOR|TIMESTAMP [cite: 26, 32, 33]
-            string dataMsg = $"DATA|{sensorId}|{tipo}|{valor}|{timestamp}";
+            // Formato: DATA|sensorId|zona|tipo|valor|timestamp
+            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
             await writer.WriteLineAsync(dataMsg);
             Console.WriteLine($"[ENVIADO]: {dataMsg}");
+
+            // Ler confirmação do gateway
+            try
+            {
+                string? ack = await reader.ReadLineAsync();
+                Console.WriteLine($"[GATEWAY]: {ack}");
+            }
+            catch { }
         }
         else
         {

@@ -1,4 +1,5 @@
 using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -210,6 +211,7 @@ namespace Gateway
                         string zona = partes[2];
                         string tipo = partes[3];
                         string valor = partes[4];
+                        string timestamp = DateTime.Now.ToString("s");
 
                         if (sensorId != sensorAtual || !sensores.ContainsKey(sensorId))
                         {
@@ -228,7 +230,9 @@ namespace Gateway
                         sensor.LastSync = DateTime.Now.ToString("s");
                         GuardarSensores(ficheiroCsv);
 
-                        string mensagemServidor = $"STORE|{sensorId}|{zona}|{tipo}|{valor}";
+                        // Include timestamp if provided by the sensor (partes[5])
+                        string timestamp = partes.Length >= 6 ? partes[5] : DateTime.Now.ToString("s");
+                        string mensagemServidor = $"STORE|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
                         bool enviado = await EnviarAoServidor(ipServidor, portaServidor, mensagemServidor);
 
                         if (enviado)

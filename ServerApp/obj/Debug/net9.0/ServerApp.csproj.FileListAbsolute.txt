@@ -1,0 +1,15 @@
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\bin\Debug\net9.0\ServerApp.exe
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\bin\Debug\net9.0\ServerApp.deps.json
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\bin\Debug\net9.0\ServerApp.runtimeconfig.json
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\bin\Debug\net9.0\ServerApp.dll
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\bin\Debug\net9.0\ServerApp.pdb
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.AssemblyInfoInputs.cache
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.AssemblyInfo.cs
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.csproj.CoreCompileInputs.cache
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.sourcelink.json
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.dll
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\refint\ServerApp.dll
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.pdb
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ServerApp.genruntimeconfig.cache
+C:\Users\salom\Source\Repos\TP1-Sistemas-Distribu-dos\ServerApp\obj\Debug\net9.0\ref\ServerApp.dll
