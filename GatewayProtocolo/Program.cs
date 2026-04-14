@@ -36,10 +36,11 @@ namespace Gateway
         private static Dictionary<string, VideoSession> sessoesVideo = new();
 
         private static int portaTcpGateway = 5000;
-        private static int portaUdpGateway = 5001;
+        private static int portaUdpGateway = 7000;
         private static string ipServidor = "127.0.0.1";
         private static int portaServidor = 6000;
         private static string ficheiroCsv = "sensores.csv";
+        private static string gatewayId = "GW01";
 
         static async Task Main(string[] args)
         {
@@ -54,6 +55,17 @@ namespace Gateway
                 return;
             }
 
+            string respostaInit = await InicializarLigacaoServidor();
+
+            if (!respostaInit.StartsWith("ACK"))
+            {
+                Console.WriteLine("Não foi possível inicializar a ligação com o servidor.");
+                Console.WriteLine($"Resposta recebida: {respostaInit}");
+                return;
+            }
+
+            Console.WriteLine("Ligação inicial com o servidor concluída com sucesso.");
+
             TcpListener listener = new TcpListener(IPAddress.Any, portaTcpGateway);
             listener.Start();
 
@@ -67,6 +79,28 @@ namespace Gateway
             {
                 TcpClient clienteSensor = await listener.AcceptTcpClientAsync();
                 _ = Task.Run(() => TratarSensor(clienteSensor));
+            }
+        }
+
+        static async Task<string> InicializarLigacaoServidor()
+        {
+            try
+            {
+                string resposta1 = await EnviarParaServidor("HELLO_GATEWAY");
+                if (!resposta1.StartsWith("ACK"))
+                    return resposta1;
+
+                string resposta2 = await EnviarParaServidor($"GATEWAY_REGISTER|{gatewayId}");
+                if (!resposta2.StartsWith("ACK"))
+                    return resposta2;
+
+                string resposta3 = await EnviarParaServidor($"SESSION_START|{gatewayId}");
+                return resposta3;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Erro na inicialização com o servidor: {ex.Message}");
+                return "ERROR|INIT_SERVER";
             }
         }
 
