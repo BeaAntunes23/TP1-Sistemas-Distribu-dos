@@ -36,7 +36,7 @@ namespace Gateway
         private static Dictionary<string, VideoSession> sessoesVideo = new();
 
         private static int portaTcpGateway = 5000;
-        private static int portaUdpGateway = 7000;
+        private static int portaUdpGateway = 5001;
         private static string ipServidor = "127.0.0.1";
         private static int portaServidor = 6000;
         private static string ficheiroCsv = "sensores.csv";
