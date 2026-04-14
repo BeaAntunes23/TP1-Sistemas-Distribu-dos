@@ -1,10 +1,12 @@
-﻿using System;
+﻿using System.Net; // Necessário para IPEndPoint e UDP
+using System;
 using System.Net.Sockets;
 using System.Text;
 
 string sensorId = "S102";
 string zona = "ZONA_ESCOLAR";
 int portaGateway = 5000;
+int portaUdpVideo = 5001; // Porta diferente da do Gateway TCP
 bool isRunning = true;
 
 Console.Write("IP do Gateway (ex: 127.0.0.1): ");
@@ -63,38 +65,61 @@ try
         }
 
         // Envio de necessidade de stream de vídeo
-        if (cmd == "VIDEO")
+        // Envio de necessidade de stream de vídeo (TCP para controlo, UDP para dados)
+        if (cmd != "VIDEO")
         {
-            string videoMsg = $"STREAM_REQ|{sensorId}|VIDEO_START|{DateTime.Now:s}";
-            await writer.WriteLineAsync(videoMsg);
-            Console.WriteLine($"[SOLICITAÇÃO]: {videoMsg}");
-            continue;
-        }
-
-        // Envio de medições ambientais
-        string[] parts = input.Split(':');
-        if (parts.Length == 2)
-        {
-            string tipo = parts[0].Trim().ToUpper();
-            string valor = parts[1].Trim();
-            string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
-
-            // Formato: DATA|sensorId|zona|tipo|valor|timestamp
-            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
-            await writer.WriteLineAsync(dataMsg);
-            Console.WriteLine($"[ENVIADO]: {dataMsg}");
-
-            // Ler confirmação do gateway
-            try
+            // Envio de medições ambientais
+            string[] parts = input.Split(':');
+            if (parts.Length == 2)
             {
-                string? ack = await reader.ReadLineAsync();
-                Console.WriteLine($"[GATEWAY]: {ack}");
+                string tipo = parts[0].Trim().ToUpper();
+                string valor = parts[1].Trim();
+                string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
+
+                // Formato: DATA|sensorId|zona|tipo|valor|timestamp
+                string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
+                await writer.WriteLineAsync(dataMsg);
+                Console.WriteLine($"[ENVIADO]: {dataMsg}");
+
+                // Ler confirmação do gateway
+                try
+                {
+                    string? ack = await reader.ReadLineAsync();
+                    Console.WriteLine($"[GATEWAY]: {ack}");
+                }
+                catch { }
             }
-            catch { }
+            else
+            {
+                Console.WriteLine("Formato inválido. Use 'TIPO:VALOR' ou 'VIDEO'.");
+            }
         }
         else
         {
-            Console.WriteLine("Formato inválido. Use 'TIPO:VALOR' ou 'VIDEO'.");
+            // 1. Sinalização por TCP (Garante que o Gateway sabe que o vídeo vai começar)
+            string videoControlMsg = $"STREAM_REQ|{sensorId}|UDP_START|{portaUdpVideo}";
+            await writer.WriteLineAsync(videoControlMsg);
+            Console.WriteLine($"[CONTROLO TCP]: {videoControlMsg}");
+
+            // 2. Simulação de envio de frames por UDP (Fase 3 - Funcionalidade Extra)
+            _ = Task.Run(async () =>
+            {
+                using UdpClient udpClient = new UdpClient();
+                IPEndPoint remoteEP = new IPEndPoint(IPAddress.Parse(gatewayIP), portaUdpVideo);
+
+                Console.WriteLine("[UDP] Streaming de vídeo iniciado...");
+
+                for (int i = 0; i < 50; i++) // Simula o envio de 50 frames
+                {
+                    string frameData = $"FRAME|{sensorId}|{i}|{DateTime.Now:HH:mm:ss.fff}";
+                    byte[] data = Encoding.UTF8.GetBytes(frameData);
+                    await udpClient.SendAsync(data, data.Length, remoteEP);
+
+                    await Task.Delay(100); // Simula 10 FPS
+                }
+                Console.WriteLine("[UDP] Streaming de vídeo terminado.");
+            });
+            continue;
         }
     }
 }
