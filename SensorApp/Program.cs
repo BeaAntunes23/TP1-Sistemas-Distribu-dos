@@ -9,7 +9,7 @@ namespace SensorApp
 {
     class Program
     {
-        // Variáveis de configuração
+        // Variáveis globais da classe (precisam de ser static para o Main aceder)
         private static string sensorId = "S102";
         private static string zona = "ZONA_ESCOLAR";
         private static int portaGateway = 5000;
@@ -18,33 +18,37 @@ namespace SensorApp
 
         static async Task Main(string[] args)
         {
+            Console.WriteLine("--- Inicializando Sensor ---");
             Console.Write("IP do Gateway (ex: 127.0.0.1): ");
             string gatewayIP = Console.ReadLine() ?? "127.0.0.1";
 
             try
             {
-                using TcpClient client = new TcpClient(gatewayIP, portaGateway);
+                // Configuração do Cliente TCP
+                using TcpClient client = new TcpClient();
+                await client.ConnectAsync(gatewayIP, portaGateway);
+                
                 using NetworkStream stream = client.GetStream();
                 using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
                 using StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
 
                 Console.WriteLine($"\n[CONECTADO] Gateway em {gatewayIP}:{portaGateway}");
 
-                // 1. REGISTO: Identificar-se e indicar tipos de dados
+                // 1. REGISTO
                 string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP,RUIDO";
                 await writer.WriteLineAsync(regMsg);
 
                 string? resReg = await reader.ReadLineAsync();
                 Console.WriteLine($"[GATEWAY]: {resReg}");
 
-                // 2. HEARTBEAT: Tarefa em segundo plano (TCP)
+                // 2. HEARTBEAT (Thread de fundo)
                 _ = Task.Run(async () =>
                 {
                     while (isRunning)
                     {
                         try
                         {
-                            await Task.Delay(10000); // Envia a cada 10 segundos
+                            await Task.Delay(10000); // 10 segundos
                             if (isRunning)
                             {
                                 await writer.WriteLineAsync($"HEARTBEAT|{sensorId}");
@@ -54,7 +58,7 @@ namespace SensorApp
                     }
                 });
 
-                // 3. INTERFACE DE SIMULAÇÃO
+                // 3. INTERFACE
                 Console.WriteLine("\n--- Simulação de Sensor (One Health) ---");
                 Console.WriteLine("Comandos: TIPO:VALOR | VIDEO | SAIR");
 
@@ -65,7 +69,6 @@ namespace SensorApp
 
                     string cmd = input.ToUpper();
 
-                    // Verificação de saída
                     if (cmd == "SAIR")
                     {
                         isRunning = false;
@@ -73,54 +76,54 @@ namespace SensorApp
                         break;
                     }
 
-                    // Comando de Vídeo (TCP para controlo, UDP para streaming)
                     if (cmd == "VIDEO")
                     {
-                        // Sinalização por TCP
+                        // Controlo por TCP
                         string videoControlMsg = $"STREAM_REQ|{sensorId}|UDP_START|{portaUdpVideo}";
                         await writer.WriteLineAsync(videoControlMsg);
                         Console.WriteLine($"[CONTROLO TCP]: {videoControlMsg}");
 
-                        // Simulação de streaming por UDP em background
+                        // Dados por UDP (Thread de fundo)
                         _ = Task.Run(async () =>
                         {
-                            using UdpClient udpClient = new UdpClient();
-                            IPEndPoint remoteEP = new IPEndPoint(IPAddress.Parse(gatewayIP), portaUdpVideo);
-
-                            Console.WriteLine("[UDP] Streaming de vídeo iniciado...");
-
-                            for (int i = 0; i < 50; i++) // Envia 50 frames
+                            try
                             {
-                                string frameData = $"FRAME|{sensorId}|{i}|{DateTime.Now:HH:mm:ss.fff}";
-                                byte[] data = Encoding.UTF8.GetBytes(frameData);
-                                await udpClient.SendAsync(data, data.Length, remoteEP);
-                                await Task.Delay(100); // Simula 10 FPS
+                                using UdpClient udpClient = new UdpClient();
+                                IPEndPoint remoteEP = new IPEndPoint(IPAddress.Parse(gatewayIP), portaUdpVideo);
+                                Console.WriteLine("[UDP] Streaming iniciado...");
+
+                                for (int i = 0; i < 50; i++) 
+                                {
+                                    if (!isRunning) break;
+                                    string frameData = $"FRAME|{sensorId}|{i}|{DateTime.Now:HH:mm:ss.fff}";
+                                    byte[] data = Encoding.UTF8.GetBytes(frameData);
+                                    await udpClient.SendAsync(data, data.Length, remoteEP);
+                                    await Task.Delay(100); 
+                                }
+                                Console.WriteLine("[UDP] Streaming terminado.");
                             }
-                            Console.WriteLine("[UDP] Streaming de vídeo terminado.");
+                            catch (Exception ex) { Console.WriteLine($"[ERRO UDP]: {ex.Message}"); }
                         });
                         continue;
                     }
 
-                    // Envio de medições ambientais (TIPO:VALOR)
-                    string[] parts = input.Split(':');
-                    if (parts.Length == 2)
+                    // Envio de Dados Ambientais
+                    if (input.Contains(":"))
                     {
-                        string tipo = parts[0].Trim().ToUpper();
-                        string valor = parts[1].Trim();
-                        string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
-
-                        // Formato: DATA|sensorId|zona|tipo|valor|timestamp
-                        string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
-                        await writer.WriteLineAsync(dataMsg);
-                        Console.WriteLine($"[ENVIADO]: {dataMsg}");
-
-                        // Ler confirmação (ACK) do gateway
-                        try
+                        string[] parts = input.Split(':');
+                        if (parts.Length == 2)
                         {
+                            string tipo = parts[0].Trim().ToUpper();
+                            string valor = parts[1].Trim();
+                            string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
+
+                            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
+                            await writer.WriteLineAsync(dataMsg);
+                            Console.WriteLine($"[ENVIADO]: {dataMsg}");
+
                             string? ack = await reader.ReadLineAsync();
                             Console.WriteLine($"[GATEWAY]: {ack}");
                         }
-                        catch { }
                     }
                     else
                     {
@@ -130,12 +133,10 @@ namespace SensorApp
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[ERRO DE LIGAÇÃO]: {ex.Message}");
-                isRunning = false;
+                Console.WriteLine($"[ERRO]: {ex.Message}");
             }
-
-            Console.WriteLine("Aplicação Sensor terminada. Prima qualquer tecla para sair.");
-            Console.ReadKey();
+            
+            Console.WriteLine("Saindo...");
         }
     }
 }
