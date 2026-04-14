@@ -1,11 +1,11 @@
 using System;
-using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Gateway
@@ -16,102 +16,137 @@ namespace Gateway
         public string Estado { get; set; } = "";
         public string Zona { get; set; } = "";
         public List<string> TiposDados { get; set; } = new();
-        public string LastSync { get; set; } = "-";
+        public DateTime? LastSync { get; set; }
+    }
+
+    class VideoSession
+    {
+        public string SensorId { get; set; } = "";
+        public string Zona { get; set; } = "";
+        public bool Ativa { get; set; }
     }
 
     class Program
     {
         private static readonly object fileLock = new object();
+        private static readonly object sensorLock = new object();
+        private static readonly object videoLock = new object();
+
         private static Dictionary<string, SensorInfo> sensores = new();
+        private static Dictionary<string, VideoSession> sessoesVideo = new();
+
+        private static int portaTcpGateway = 5000;
+        private static int portaUdpGateway = 5001;
+        private static string ipServidor = "127.0.0.1";
+        private static int portaServidor = 6000;
+        private static string ficheiroCsv = "sensores.csv";
 
         static async Task Main(string[] args)
         {
-            int portaGateway = 5000;
-            string ipServidor = "127.0.0.1";
-            int portaServidor = 6000;
-            string ficheiroCsv = "sensores.csv";
+            try
+            {
+                CarregarSensores(ficheiroCsv);
+            }
+            catch (FileNotFoundException ex)
+            {
+                Console.WriteLine($"Erro: {ex.Message}");
+                Console.WriteLine($"Ficheiro em falta: {ex.FileName}");
+                return;
+            }
 
-            CarregarSensores(ficheiroCsv);
-
-            TcpListener listener = new TcpListener(IPAddress.Any, portaGateway);
+            TcpListener listener = new TcpListener(IPAddress.Any, portaTcpGateway);
             listener.Start();
 
-            Console.WriteLine($"Gateway à escuta na porta {portaGateway}...");
+            Console.WriteLine($"Gateway TCP à escuta na porta {portaTcpGateway}...");
+            Console.WriteLine($"Gateway UDP à escuta na porta {portaUdpGateway}...");
+
+            _ = Task.Run(() => MonitorizarHeartbeats());
+            _ = Task.Run(() => ReceberVideoUdp());
 
             while (true)
             {
                 TcpClient clienteSensor = await listener.AcceptTcpClientAsync();
-                _ = Task.Run(() => TratarSensor(clienteSensor, ipServidor, portaServidor, ficheiroCsv));
+                _ = Task.Run(() => TratarSensor(clienteSensor));
             }
         }
 
         static void CarregarSensores(string ficheiroCsv)
-    {
-        sensores.Clear();
-
-        if (!File.Exists(ficheiroCsv))
         {
-            Console.WriteLine("Ficheiro CSV não encontrado. A criar exemplo...");
-            Console.WriteLine("Confirme se o Ficheiro CS existe e se o caminho está correto.");
-            //Teste inicial, pode ser removido depois
-            /* File.WriteAllLines(ficheiroCsv, new[]
-             {
-             "sensor_id:estado:zona:[tipos_dados]:last_sync",
-             "S101:ativo:ZONA_CENTRO:[TEMP,HUM,RUIDO]:-",
-             "S102:ativo:ZONA_ESCOLAR:[PM2.5,TEMP]:-",
-             "S103:manutencao:ZONA_INDUSTRIAL:[AR,PM10]:-"
-             });*/
-        }
-    
-        var linhas = File.ReadAllLines(ficheiroCsv);
-
-        foreach (var linha in linhas.Skip(1)) //lembrar de colocar skip(0) caso nao tenha header
-        {
-            if (string.IsNullOrWhiteSpace(linha))
-                continue;
-
-            string[] partes = linha.Split(':');
-            if (partes.Length < 5)
-                continue;
-    
-            string id = partes[0];
-            string estado = partes[1];
-            string zona = partes[2];
-            string tiposRaw = partes[3].Trim('[', ']');
-            string lastSync = string.Join(":", partes.Skip(4));
-    
-            sensores[id] = new SensorInfo
+            lock (sensorLock)
             {
-                Id = id,
-                Estado = estado,
-                Zona = zona,
-                TiposDados = tiposRaw.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                                     .Select(t => t.Trim())
-                                     .ToList(),
-                LastSync = lastSync
-            };
+                sensores.Clear();
+
+                if (!File.Exists(ficheiroCsv))
+                {
+                    throw new FileNotFoundException(
+                        "O ficheiro de configuração dos sensores não foi encontrado.",
+                        ficheiroCsv
+                    );
+                }
+
+                var linhas = File.ReadAllLines(ficheiroCsv);
+
+                foreach (var linha in linhas.Skip(1))
+                {
+                    if (string.IsNullOrWhiteSpace(linha))
+                        continue;
+
+                    string[] partes = linha.Split(':');
+                    if (partes.Length < 5)
+                        continue;
+
+                    string id = partes[0].Trim();
+                    string estado = partes[1].Trim();
+                    string zona = partes[2].Trim();
+                    string tiposRaw = partes[3].Trim().Trim('[', ']');
+                    string lastSyncRaw = string.Join(":", partes.Skip(4)).Trim();
+
+                    DateTime? lastSync = null;
+                    if (lastSyncRaw != "-" && DateTime.TryParse(lastSyncRaw, out DateTime dataLida))
+                    {
+                        lastSync = dataLida;
+                    }
+
+                    sensores[id] = new SensorInfo
+                    {
+                        Id = id,
+                        Estado = estado,
+                        Zona = zona,
+                        TiposDados = tiposRaw
+                            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                            .Select(t => t.Trim())
+                            .ToList(),
+                        LastSync = lastSync
+                    };
+                }
+            }
         }
-    }
+
         static void GuardarSensores(string ficheiroCsv)
         {
             lock (fileLock)
             {
-                var linhas = new List<string>
+                lock (sensorLock)
                 {
-                    "sensor_id:estado:zona:[tipos_dados]:last_sync" //verificar se o header é necessário ou se deve ser removido 
-                };
+                    var linhas = new List<string>
+                    {
+                        "sensor_id:estado:zona:[tipos_dados]:last_sync"
+                    };
 
-                foreach (var s in sensores.Values.OrderBy(x => x.Id))
-                {
-                    string tipos = "[" + string.Join(",", s.TiposDados) + "]";
-                    linhas.Add($"{s.Id}:{s.Estado}:{s.Zona}:{tipos}:{s.LastSync}");
+                    foreach (var s in sensores.Values.OrderBy(x => x.Id))
+                    {
+                        string tipos = "[" + string.Join(",", s.TiposDados) + "]";
+                        string lastSync = s.LastSync.HasValue ? s.LastSync.Value.ToString("s") : "-";
+
+                        linhas.Add($"{s.Id}:{s.Estado}:{s.Zona}:{tipos}:{lastSync}");
+                    }
+
+                    File.WriteAllLines(ficheiroCsv, linhas);
                 }
-
-                File.WriteAllLines(ficheiroCsv, linhas);
             }
         }
 
-        static async Task TratarSensor(TcpClient clienteSensor, string ipServidor, int portaServidor, string ficheiroCsv)
+        static async Task TratarSensor(TcpClient clienteSensor)
         {
             Console.WriteLine("Sensor ligado ao gateway.");
 
@@ -138,7 +173,7 @@ namespace Gateway
                         continue;
                     }
 
-                    string comando = partes[0].ToUpper();
+                    string comando = partes[0].ToUpperInvariant();
 
                     if (comando == "HELLO")
                     {
@@ -154,17 +189,22 @@ namespace Gateway
 
                         string sensorId = partes[1];
                         string zona = partes[2];
-                        var tipos = partes[3].Split(',', StringSplitOptions.RemoveEmptyEntries)
-                                             .Select(t => t.Trim())
-                                             .ToList();
+                        var tipos = partes[3]
+                            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                            .Select(t => t.Trim())
+                            .ToList();
 
-                        if (!sensores.ContainsKey(sensorId))
+                        SensorInfo? sensor;
+                        lock (sensorLock)
+                        {
+                            sensores.TryGetValue(sensorId, out sensor);
+                        }
+
+                        if (sensor == null)
                         {
                             await writer.WriteLineAsync("ERROR|SENSOR_NOT_FOUND");
                             continue;
                         }
-
-                        var sensor = sensores[sensorId];
 
                         if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
                         {
@@ -178,14 +218,20 @@ namespace Gateway
                             continue;
                         }
 
-                        bool tiposValidos = tipos.All(t => sensor.TiposDados.Contains(t, StringComparer.OrdinalIgnoreCase));
+                        bool tiposValidos = tipos.All(t =>
+                            sensor.TiposDados.Contains(t, StringComparer.OrdinalIgnoreCase));
+
                         if (!tiposValidos)
                         {
                             await writer.WriteLineAsync("ERROR|UNSUPPORTED_TYPE");
                             continue;
                         }
 
-                        sensor.LastSync = DateTime.Now.ToString("s");
+                        lock (sensorLock)
+                        {
+                            sensores[sensorId].LastSync = DateTime.Now;
+                        }
+
                         GuardarSensores(ficheiroCsv);
 
                         registado = true;
@@ -211,15 +257,30 @@ namespace Gateway
                         string zona = partes[2];
                         string tipo = partes[3];
                         string valor = partes[4];
-                        string timestamp = DateTime.Now.ToString("s");
 
-                        if (sensorId != sensorAtual || !sensores.ContainsKey(sensorId))
+                        SensorInfo? sensor;
+                        lock (sensorLock)
+                        {
+                            sensores.TryGetValue(sensorId, out sensor);
+                        }
+
+                        if (sensor == null || sensorId != sensorAtual)
                         {
                             await writer.WriteLineAsync("ERROR|INVALID_SENSOR");
                             continue;
                         }
 
-                        var sensor = sensores[sensorId];
+                        if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await writer.WriteLineAsync("ERROR|INVALID_STATE");
+                            continue;
+                        }
+
+                        if (!sensor.Zona.Equals(zona, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await writer.WriteLineAsync("ERROR|INVALID_ZONE");
+                            continue;
+                        }
 
                         if (!sensor.TiposDados.Contains(tipo, StringComparer.OrdinalIgnoreCase))
                         {
@@ -227,16 +288,121 @@ namespace Gateway
                             continue;
                         }
 
-                        sensor.LastSync = DateTime.Now.ToString("s");
+                        lock (sensorLock)
+                        {
+                            sensores[sensorId].LastSync = DateTime.Now;
+                        }
+
                         GuardarSensores(ficheiroCsv);
 
-                        // Include timestamp if provided by the sensor (partes[5])
-                        string timestamp = partes.Length >= 6 ? partes[5] : DateTime.Now.ToString("s");
-                        string mensagemServidor = $"STORE|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
-                        bool enviado = await EnviarAoServidor(ipServidor, portaServidor, mensagemServidor);
+                        string mensagemServidor = $"STORE|{sensorId}|{zona}|{tipo}|{valor}";
+                        string respostaServidor = await EnviarParaServidor(mensagemServidor);
 
-                        if (enviado)
+                        if (respostaServidor.StartsWith("ACK"))
                             await writer.WriteLineAsync("ACK|DATA");
+                        else
+                            await writer.WriteLineAsync("ERROR|SERVER");
+                    }
+                    else if (comando == "VIDEO_START")
+                    {
+                        if (!registado)
+                        {
+                            await writer.WriteLineAsync("ERROR|NOT_REGISTERED");
+                            continue;
+                        }
+
+                        if (partes.Length < 3)
+                        {
+                            await writer.WriteLineAsync("ERROR|VIDEO_START");
+                            continue;
+                        }
+
+                        string sensorId = partes[1];
+                        string zona = partes[2];
+
+                        SensorInfo? sensor;
+                        lock (sensorLock)
+                        {
+                            sensores.TryGetValue(sensorId, out sensor);
+                        }
+
+                        if (sensor == null || sensorId != sensorAtual)
+                        {
+                            await writer.WriteLineAsync("ERROR|INVALID_SENSOR");
+                            continue;
+                        }
+
+                        if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await writer.WriteLineAsync("ERROR|INVALID_STATE");
+                            continue;
+                        }
+
+                        if (!sensor.Zona.Equals(zona, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await writer.WriteLineAsync("ERROR|INVALID_ZONE");
+                            continue;
+                        }
+
+                        lock (videoLock)
+                        {
+                            sessoesVideo[sensorId] = new VideoSession
+                            {
+                                SensorId = sensorId,
+                                Zona = zona,
+                                Ativa = true
+                            };
+                        }
+
+                        lock (sensorLock)
+                        {
+                            sensores[sensorId].LastSync = DateTime.Now;
+                        }
+
+                        GuardarSensores(ficheiroCsv);
+
+                        string respostaServidor = await EnviarParaServidor($"VIDEO_START|{sensorId}|{zona}");
+
+                        if (respostaServidor.StartsWith("ACK"))
+                            await writer.WriteLineAsync($"ACK|VIDEO_START|UDP_PORT|{portaUdpGateway}");
+                        else
+                            await writer.WriteLineAsync("ERROR|SERVER");
+                    }
+                    else if (comando == "VIDEO_END")
+                    {
+                        if (!registado)
+                        {
+                            await writer.WriteLineAsync("ERROR|NOT_REGISTERED");
+                            continue;
+                        }
+
+                        if (partes.Length < 3)
+                        {
+                            await writer.WriteLineAsync("ERROR|VIDEO_END");
+                            continue;
+                        }
+
+                        string sensorId = partes[1];
+                        string zona = partes[2];
+
+                        lock (videoLock)
+                        {
+                            if (sessoesVideo.ContainsKey(sensorId))
+                                sessoesVideo[sensorId].Ativa = false;
+                        }
+
+                        lock (sensorLock)
+                        {
+                            if (sensores.ContainsKey(sensorId))
+                                sensores[sensorId].LastSync = DateTime.Now;
+                        }
+
+                        GuardarSensores(ficheiroCsv);
+
+                        string respostaServidor = await EnviarParaServidor($"VIDEO_END|{sensorId}|{zona}");
+
+                        if (respostaServidor.StartsWith("ACK"))
+                            await writer.WriteLineAsync("ACK|VIDEO_END");
                         else
                             await writer.WriteLineAsync("ERROR|SERVER");
                     }
@@ -250,19 +416,38 @@ namespace Gateway
 
                         string sensorId = partes[1];
 
-                        if (!sensores.ContainsKey(sensorId))
+                        lock (sensorLock)
+                        {
+                            if (!sensores.ContainsKey(sensorId))
+                            {
+                                sensorId = "";
+                            }
+                            else
+                            {
+                                sensores[sensorId].LastSync = DateTime.Now;
+                            }
+                        }
+
+                        if (string.IsNullOrEmpty(sensorId))
                         {
                             await writer.WriteLineAsync("ERROR|SENSOR_NOT_FOUND");
                             continue;
                         }
 
-                        sensores[sensorId].LastSync = DateTime.Now.ToString("s");
                         GuardarSensores(ficheiroCsv);
-
                         await writer.WriteLineAsync("ACK|HEARTBEAT");
                     }
                     else if (comando == "BYE")
                     {
+                        if (!string.IsNullOrWhiteSpace(sensorAtual))
+                        {
+                            lock (videoLock)
+                            {
+                                if (sessoesVideo.ContainsKey(sensorAtual))
+                                    sessoesVideo[sensorAtual].Ativa = false;
+                            }
+                        }
+
                         await writer.WriteLineAsync("OK|BYE");
                         break;
                     }
@@ -276,7 +461,93 @@ namespace Gateway
             Console.WriteLine("Ligação com sensor terminada.");
         }
 
-        static async Task<bool> EnviarAoServidor(string ipServidor, int portaServidor, string mensagem)
+        static async Task ReceberVideoUdp()
+        {
+            using UdpClient udp = new UdpClient(portaUdpGateway);
+
+            while (true)
+            {
+                try
+                {
+                    UdpReceiveResult resultado = await udp.ReceiveAsync();
+                    string mensagem = Encoding.UTF8.GetString(resultado.Buffer);
+
+                    Console.WriteLine($"Frame UDP recebido: {mensagem}");
+
+                    // formato:
+                    // VIDEO_FRAME|S102|ZONA_ESCOLAR|frame001
+                    string[] partes = mensagem.Split('|');
+
+                    if (partes.Length < 4)
+                    {
+                        Console.WriteLine("Datagrama UDP inválido.");
+                        continue;
+                    }
+
+                    string comando = partes[0].ToUpperInvariant();
+                    if (comando != "VIDEO_FRAME")
+                        continue;
+
+                    string sensorId = partes[1];
+                    string zona = partes[2];
+                    string conteudo = partes[3];
+
+                    SensorInfo? sensor;
+                    lock (sensorLock)
+                    {
+                        sensores.TryGetValue(sensorId, out sensor);
+                    }
+
+                    if (sensor == null)
+                    {
+                        Console.WriteLine($"Sensor {sensorId} não registado para vídeo.");
+                        continue;
+                    }
+
+                    if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"Sensor {sensorId} não está ativo.");
+                        continue;
+                    }
+
+                    if (!sensor.Zona.Equals(zona, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"Zona inválida no frame UDP de {sensorId}.");
+                        continue;
+                    }
+
+                    bool videoPermitido;
+                    lock (videoLock)
+                    {
+                        videoPermitido = sessoesVideo.ContainsKey(sensorId) && sessoesVideo[sensorId].Ativa;
+                    }
+
+                    if (!videoPermitido)
+                    {
+                        Console.WriteLine($"Sessão de vídeo não ativa para {sensorId}.");
+                        continue;
+                    }
+
+                    lock (sensorLock)
+                    {
+                        sensores[sensorId].LastSync = DateTime.Now;
+                    }
+
+                    GuardarSensores(ficheiroCsv);
+
+                    string mensagemServidor = $"VIDEO_FRAME|{sensorId}|{zona}|{conteudo}";
+                    string resposta = await EnviarParaServidor(mensagemServidor);
+
+                    Console.WriteLine($"Resposta do servidor ao frame UDP: {resposta}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Erro no UDP do gateway: {ex.Message}");
+                }
+            }
+        }
+
+        static async Task<string> EnviarParaServidor(string mensagem)
         {
             try
             {
@@ -287,18 +558,45 @@ namespace Gateway
                 using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
                 using StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
 
-                Console.WriteLine($"Encaminhado para servidor: {mensagem}");
+                Console.WriteLine($"A enviar para o servidor: {mensagem}");
                 await writer.WriteLineAsync(mensagem);
 
                 string? resposta = await reader.ReadLineAsync();
-                Console.WriteLine($"Resposta do servidor: {resposta}");
 
-                return resposta != null && resposta.StartsWith("ACK");
+                if (string.IsNullOrWhiteSpace(resposta))
+                    return "ERROR|NO_RESPONSE";
+
+                Console.WriteLine($"Resposta do servidor: {resposta}");
+                return resposta;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Erro ao contactar servidor: {ex.Message}");
-                return false;
+                Console.WriteLine($"Erro ao enviar para o servidor: {ex.Message}");
+                return "ERROR|SERVER_CONNECTION";
+            }
+        }
+
+        static void MonitorizarHeartbeats()
+        {
+            while (true)
+            {
+                Thread.Sleep(10000);
+
+                lock (sensorLock)
+                {
+                    foreach (var sensor in sensores.Values)
+                    {
+                        if (sensor.LastSync.HasValue)
+                        {
+                            TimeSpan diferenca = DateTime.Now - sensor.LastSync.Value;
+
+                            if (diferenca.TotalSeconds > 30)
+                            {
+                                Console.WriteLine($"Aviso: o sensor {sensor.Id} pode estar inativo.");
+                            }
+                        }
+                    }
+                }
             }
         }
     }
