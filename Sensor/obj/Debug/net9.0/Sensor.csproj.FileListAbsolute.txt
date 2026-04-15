@@ -1,0 +1,15 @@
+C:\LEI\SD\Sensor\bin\Debug\net9.0\Sensor.exe
+C:\LEI\SD\Sensor\bin\Debug\net9.0\Sensor.deps.json
+C:\LEI\SD\Sensor\bin\Debug\net9.0\Sensor.runtimeconfig.json
+C:\LEI\SD\Sensor\bin\Debug\net9.0\Sensor.dll
+C:\LEI\SD\Sensor\bin\Debug\net9.0\Sensor.pdb
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.GeneratedMSBuildEditorConfig.editorconfig
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.AssemblyInfoInputs.cache
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.AssemblyInfo.cs
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.csproj.CoreCompileInputs.cache
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.sourcelink.json
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.dll
+C:\LEI\SD\Sensor\obj\Debug\net9.0\refint\Sensor.dll
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.pdb
+C:\LEI\SD\Sensor\obj\Debug\net9.0\Sensor.genruntimeconfig.cache
+C:\LEI\SD\Sensor\obj\Debug\net9.0\ref\Sensor.dll
