@@ -26,9 +26,13 @@ namespace Gateway
         public bool Ativa { get; set; }
     }
 
+    static class GatewayFileMutex
+    {
+        public static Mutex SensoresCsvMutex = new Mutex();
+    }
+
     class Program
     {
-        private static readonly object fileLock = new object();
         private static readonly object sensorLock = new object();
         private static readonly object videoLock = new object();
 
@@ -106,59 +110,70 @@ namespace Gateway
 
         static void CarregarSensores(string ficheiroCsv)
         {
-            lock (sensorLock)
+            GatewayFileMutex.SensoresCsvMutex.WaitOne();
+
+            try
             {
-                sensores.Clear();
-
-                if (!File.Exists(ficheiroCsv))
+                lock (sensorLock)
                 {
-                    throw new FileNotFoundException(
-                        "O ficheiro de configuração dos sensores não foi encontrado.",
-                        ficheiroCsv
-                    );
-                }
+                    sensores.Clear();
 
-                var linhas = File.ReadAllLines(ficheiroCsv);
-
-                foreach (var linha in linhas.Skip(1))
-                {
-                    if (string.IsNullOrWhiteSpace(linha))
-                        continue;
-
-                    string[] partes = linha.Split(':');
-                    if (partes.Length < 5)
-                        continue;
-
-                    string id = partes[0].Trim();
-                    string estado = partes[1].Trim();
-                    string zona = partes[2].Trim();
-                    string tiposRaw = partes[3].Trim().Trim('[', ']');
-                    string lastSyncRaw = string.Join(":", partes.Skip(4)).Trim();
-
-                    DateTime? lastSync = null;
-                    if (lastSyncRaw != "-" && DateTime.TryParse(lastSyncRaw, out DateTime dataLida))
+                    if (!File.Exists(ficheiroCsv))
                     {
-                        lastSync = dataLida;
+                        throw new FileNotFoundException(
+                            "O ficheiro de configuração dos sensores não foi encontrado.",
+                            ficheiroCsv
+                        );
                     }
 
-                    sensores[id] = new SensorInfo
+                    var linhas = File.ReadAllLines(ficheiroCsv);
+
+                    foreach (var linha in linhas.Skip(1))
                     {
-                        Id = id,
-                        Estado = estado,
-                        Zona = zona,
-                        TiposDados = tiposRaw
-                            .Split(',', StringSplitOptions.RemoveEmptyEntries)
-                            .Select(t => t.Trim())
-                            .ToList(),
-                        LastSync = lastSync
-                    };
+                        if (string.IsNullOrWhiteSpace(linha))
+                            continue;
+
+                        string[] partes = linha.Split(':');
+                        if (partes.Length < 5)
+                            continue;
+
+                        string id = partes[0].Trim();
+                        string estado = partes[1].Trim();
+                        string zona = partes[2].Trim();
+                        string tiposRaw = partes[3].Trim().Trim('[', ']');
+                        string lastSyncRaw = string.Join(":", partes.Skip(4)).Trim();
+
+                        DateTime? lastSync = null;
+                        if (lastSyncRaw != "-" && DateTime.TryParse(lastSyncRaw, out DateTime dataLida))
+                        {
+                            lastSync = dataLida;
+                        }
+
+                        sensores[id] = new SensorInfo
+                        {
+                            Id = id,
+                            Estado = estado,
+                            Zona = zona,
+                            TiposDados = tiposRaw
+                                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                .Select(t => t.Trim())
+                                .ToList(),
+                            LastSync = lastSync
+                        };
+                    }
                 }
+            }
+            finally
+            {
+                GatewayFileMutex.SensoresCsvMutex.ReleaseMutex();
             }
         }
 
         static void GuardarSensores(string ficheiroCsv)
         {
-            lock (fileLock)
+            GatewayFileMutex.SensoresCsvMutex.WaitOne();
+
+            try
             {
                 lock (sensorLock)
                 {
@@ -177,6 +192,10 @@ namespace Gateway
 
                     File.WriteAllLines(ficheiroCsv, linhas);
                 }
+            }
+            finally
+            {
+                GatewayFileMutex.SensoresCsvMutex.ReleaseMutex();
             }
         }
 
@@ -508,8 +527,6 @@ namespace Gateway
 
                     Console.WriteLine($"Frame UDP recebido: {mensagem}");
 
-                    // formato:
-                    // VIDEO_FRAME|S102|ZONA_ESCOLAR|frame001
                     string[] partes = mensagem.Split('|');
 
                     if (partes.Length < 4)
