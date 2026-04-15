@@ -18,10 +18,10 @@ namespace Servidor
         // Diretório onde os ficheiros de dados são guardados
         private static string dirDados = "dados";
 
-        // Lock global para acesso concorrente por ficheiro
-        // Chave: nome do ficheiro; Valor: objeto de lock
-        private static readonly Dictionary<string, object> fileLocks = new();
-        private static readonly object fileLocksMeta = new();
+        // Mutex global para acesso concorrente por ficheiro
+        // Chave: nome do ficheiro; Valor: mutex desse ficheiro
+        private static readonly Dictionary<string, Mutex> fileMutexes = new();
+        private static readonly object fileMutexesMeta = new();
 
         // Sessões de vídeo ativas: sensorId -> zona
         private static readonly Dictionary<string, string> sessoesVideo = new();
@@ -124,9 +124,9 @@ namespace Servidor
                             }
 
                             string sensorId = partes[1];
-                            string zona     = partes[2];
-                            string tipo     = partes[3];
-                            string valor    = partes[4];
+                            string zona = partes[2];
+                            string tipo = partes[3];
+                            string valor = partes[4];
                             string timestamp = DateTime.Now.ToString("s"); // ISO 8601
 
                             // Guardar em ficheiro: dados/<TIPO>.csv
@@ -149,7 +149,7 @@ namespace Servidor
                                 return;
                             }
 
-                            string vsId   = partes[1];
+                            string vsId = partes[1];
                             string vsZona = partes[2];
 
                             lock (videoLock)
@@ -194,8 +194,8 @@ namespace Servidor
                                 return;
                             }
 
-                            string vfId       = partes[1];
-                            string vfZona     = partes[2];
+                            string vfId = partes[1];
+                            string vfZona = partes[2];
                             string vfConteudo = partes[3];
                             string vfTimestamp = DateTime.Now.ToString("s");
 
@@ -237,15 +237,16 @@ namespace Servidor
         }
 
         // -----------------------------------------------------------------------
-        // Guarda uma medição ambiental em CSV com lock por ficheiro
+        // Guarda uma medição ambiental em CSV com mutex por ficheiro
         // Formato: timestamp,sensor_id,zona,tipo,valor
         // -----------------------------------------------------------------------
         static void GuardarMedicao(string ficheiro, string sensorId, string zona,
                                    string tipo, string valor, string timestamp)
         {
-            object lockObj = ObterLock(ficheiro);
+            Mutex mutex = ObterMutex(ficheiro);
+            mutex.WaitOne();
 
-            lock (lockObj)
+            try
             {
                 bool existe = File.Exists(ficheiro);
 
@@ -257,18 +258,23 @@ namespace Servidor
 
                 sw.WriteLine($"{timestamp},{sensorId},{zona},{tipo},{valor}");
             }
+            finally
+            {
+                mutex.ReleaseMutex();
+            }
         }
 
         // -----------------------------------------------------------------------
-        // Guarda metadados de frame de vídeo em CSV com lock por ficheiro
+        // Guarda metadados de frame de vídeo em CSV com mutex por ficheiro
         // Formato: timestamp,sensor_id,zona,frame
         // -----------------------------------------------------------------------
         static void GuardarFrame(string ficheiro, string sensorId, string zona,
                                  string conteudo, string timestamp)
         {
-            object lockObj = ObterLock(ficheiro);
+            Mutex mutex = ObterMutex(ficheiro);
+            mutex.WaitOne();
 
-            lock (lockObj)
+            try
             {
                 bool existe = File.Exists(ficheiro);
 
@@ -279,20 +285,24 @@ namespace Servidor
 
                 sw.WriteLine($"{timestamp},{sensorId},{zona},{conteudo}");
             }
+            finally
+            {
+                mutex.ReleaseMutex();
+            }
         }
 
         // -----------------------------------------------------------------------
-        // Obtém (ou cria) um objeto de lock associado a cada ficheiro
+        // Obtém (ou cria) um mutex associado a cada ficheiro
         // Garante acesso sequencial por ficheiro mesmo com múltiplos gateways
         // -----------------------------------------------------------------------
-        static object ObterLock(string ficheiro)
+        static Mutex ObterMutex(string ficheiro)
         {
-            lock (fileLocksMeta)
+            lock (fileMutexesMeta)
             {
-                if (!fileLocks.ContainsKey(ficheiro))
-                    fileLocks[ficheiro] = new object();
+                if (!fileMutexes.ContainsKey(ficheiro))
+                    fileMutexes[ficheiro] = new Mutex();
 
-                return fileLocks[ficheiro];
+                return fileMutexes[ficheiro];
             }
         }
     }
