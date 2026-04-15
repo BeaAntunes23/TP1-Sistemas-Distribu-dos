@@ -79,7 +79,7 @@ namespace SensorApp
                     if (cmd == "VIDEO")
                     {
                         // Controlo por TCP
-                        string videoControlMsg = $"STREAM_REQ|{sensorId}|UDP_START|{portaUdpVideo}";
+                        string videoControlMsg = $"VIDEO_START|{sensorId}|{zona}";
                         await writer.WriteLineAsync(videoControlMsg);
                         Console.WriteLine($"[CONTROLO TCP]: {videoControlMsg}");
 
@@ -115,9 +115,8 @@ namespace SensorApp
                         {
                             string tipo = parts[0].Trim().ToUpper();
                             string valor = parts[1].Trim();
-                            string timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
-
-                            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}|{timestamp}";
+            
+                            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}";
                             await writer.WriteLineAsync(dataMsg);
                             Console.WriteLine($"[ENVIADO]: {dataMsg}");
 
