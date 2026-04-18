@@ -52,19 +52,19 @@ namespace Gateway
             {
                 CarregarSensores(ficheiroCsv);
             }
-            catch (FileNotFoundException ex)
+            catch (Exception ex)
             {
-                Console.WriteLine($"Erro: {ex.Message}");
-                Console.WriteLine($"Ficheiro em falta: {ex.FileName}");
+                Console.WriteLine($"ERRO AO CARREGAR CSV: {ex.Message}");
+                Console.ReadKey(); // <--- Adiciona isto
                 return;
             }
 
             string respostaInit = await InicializarLigacaoServidor();
-
             if (!respostaInit.StartsWith("ACK"))
             {
-                Console.WriteLine("Não foi possível inicializar a ligação com o servidor.");
-                Console.WriteLine($"Resposta recebida: {respostaInit}");
+                Console.WriteLine("ERRO NA LIGAÇÃO AO SERVIDOR!");
+                Console.WriteLine($"Resposta: {respostaInit}");
+                Console.ReadKey(); // <--- Adiciona isto
                 return;
             }
 
