@@ -1,203 +1,301 @@
 using System;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
+using System.Collections.Generic;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using RabbitMQ.Client;
 
 namespace SensorApp
 {
+    /// <summary>
+    /// Sensor TP2 — publica dados ambientais num broker RabbitMQ (Pub/Sub).
+    /// Substitui a comunicação TCP directa do TP1 por publicação em tópicos.
+    ///
+    /// Exemplo de execução:
+    ///   dotnet run -- --id S101 --zona ZONA_ESCOLAR --tipos TEMP,HUMIDADE,PM2.5
+    /// </summary>
     class Program
     {
-        // Variáveis globais da classe
-        private static string sensorId = "S102";
+        // === Configuração por defeito (sobreposta pelos argumentos da CLI) ===
+        private static string sensorId = "S101";
         private static string zona = "ZONA_ESCOLAR";
-        private static int portaGateway = 5000;
-        private static int portaUdpVideo = 5001;
-        private static bool isRunning = true;
+        private static List<string> tipos = new List<string> { "TEMP", "HUMIDADE", "PM2.5" };
 
-        // Garante acesso sequencial ao canal TCP
-        private static readonly SemaphoreSlim tcpSemaphore = new SemaphoreSlim(1, 1);
+        // === Configuração do RabbitMQ ===
+        private const string RabbitHost = "localhost";
+        private const string ExchangeName = "sensors";  // topic exchange partilhado
+
+        // === Intervalos (em ms) ===
+        private const int IntervaloDados = 3000;       // 3 segundos entre medições
+        private const int IntervaloHeartbeat = 10000;  // 10 segundos entre heartbeats
+        private const int IntervaloVideo = 2000;        // 2 segundos entre frames de vídeo
+
+        private static int frameCounter = 0;
+
+        // Flag global para parar as tasks de fundo de forma ordenada
+        private static volatile bool isRunning = true;
+
+        // Gerador de números aleatórios para simular valores realistas
+        private static readonly Random rng = new Random();
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("--- Inicializando Sensor ---");
-            Console.Write("IP do Gateway (ex: 127.0.0.1): ");
-            string gatewayIP = Console.ReadLine() ?? "127.0.0.1";
+            // 1) Ler argumentos da linha de comandos
+            ParseArgs(args);
+
+            Console.WriteLine($"--- Sensor {sensorId} ({zona}) ---");
+            Console.WriteLine($"Tipos suportados: {string.Join(", ", tipos)}");
+            Console.WriteLine($"Broker: {RabbitHost}, exchange: {ExchangeName}");
+            Console.WriteLine();
+
+            // 2) Criar ligação ao RabbitMQ (API assíncrona da v7)
+            var factory = new ConnectionFactory { HostName = RabbitHost };
+
+            // O 'await using' garante que ligação e canal fecham ao sair do bloco
+            await using var connection = await factory.CreateConnectionAsync();
+            await using var channel = await connection.CreateChannelAsync();
+
+            // 3) Declarar exchange do tipo 'topic' (idempotente — não dá erro se já existir)
+            // 'topic' permite routing keys com wildcards (ex: sensor.ZONA_ESCOLAR.*)
+            await channel.ExchangeDeclareAsync(
+                exchange: ExchangeName,
+                type: ExchangeType.Topic,
+                durable: true,
+                autoDelete: false);
+
+            Console.WriteLine($"[CONECTADO] RabbitMQ em {RabbitHost}");
+
+            // 4) Publicar evento REGISTER no canal de controlo
+            await PublicarStatusAsync(channel, "REGISTER", extra: new { tipos });
+            Console.WriteLine("[REGISTER] enviado.");
+
+            // Publicar VIDEO_START
+            await PublicarStatusAsync(channel, "VIDEO_START");
+            Console.WriteLine("[VIDEO_START] enviado.");
+
+            // 5) Arrancar tasks em paralelo: dados periódicos + heartbeat + vídeo
+            var cts = new CancellationTokenSource();
+            var dadosTask = TarefaPublicarDadosAsync(channel, cts.Token);
+            var heartbeatTask = TarefaHeartbeatAsync(channel, cts.Token);
+            var videoTask = TarefaPublicarVideoAsync(channel, cts.Token);
+
+            // 6) Esperar comando do utilizador para terminar
+            Console.WriteLine("\n[Enter para terminar o sensor]");
+            Console.ReadLine();
+
+            // 7) Sinalizar paragem e esperar que as tasks acabem
+            isRunning = false;
+            cts.Cancel();
 
             try
             {
-                using TcpClient client = new TcpClient();
-                await client.ConnectAsync(gatewayIP, portaGateway);
-
-                using NetworkStream stream = client.GetStream();
-                using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
-                using StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-
-                Console.WriteLine($"\n[CONECTADO] Gateway em {gatewayIP}:{portaGateway}");
-
-                // 1. HELLO
-                string? resHello = await EnviarEReceberTcpAsync(writer, reader, "HELLO");
-                Console.WriteLine($"[GATEWAY]: {resHello}");
-
-                if (resHello == null || !resHello.StartsWith("OK"))
-                {
-                    Console.WriteLine("[ERRO] HELLO rejeitado pelo gateway.");
-                    return;
-                }
-
-                // 2. REGISTO
-                string regMsg = $"REGISTER|{sensorId}|{zona}|PM2.5,TEMP,RUIDO";
-                string? resReg = await EnviarEReceberTcpAsync(writer, reader, regMsg);
-                Console.WriteLine($"[GATEWAY]: {resReg}");
-
-                if (resReg == null || !resReg.StartsWith("OK|REGISTERED"))
-                {
-                    Console.WriteLine("[ERRO] Registo rejeitado pelo gateway.");
-                    return;
-                }
-
-                // 3. HEARTBEAT (task de fundo)
-                _ = Task.Run(async () =>
-                {
-                    while (isRunning)
-                    {
-                        try
-                        {
-                            await Task.Delay(10000);
-
-                            if (!isRunning)
-                                break;
-
-                            string heartbeatMsg = $"HEARTBEAT|{sensorId}";
-                            string? hbAck = await EnviarEReceberTcpAsync(writer, reader, heartbeatMsg);
-
-                            if (hbAck != null)
-                                Console.WriteLine($"[GATEWAY]: {hbAck}");
-                        }
-                        catch
-                        {
-                            break;
-                        }
-                    }
-                });
-
-                // 4. INTERFACE
-                Console.WriteLine("\n--- Simulação de Sensor (One Health) ---");
-                Console.WriteLine("Comandos: TIPO:VALOR | VIDEO | SAIR");
-                Console.WriteLine("Exemplos válidos para S102: PM2.5:78 | TEMP:21 | RUIDO:65");
-
-                while (isRunning)
-                {
-                    string? input = Console.ReadLine();
-                    if (string.IsNullOrWhiteSpace(input))
-                        continue;
-
-                    string cmd = input.ToUpperInvariant();
-
-                    if (cmd == "SAIR")
-                    {
-                        isRunning = false;
-
-                        string? byeAck = await EnviarEReceberTcpAsync(writer, reader, $"BYE|{sensorId}");
-                        Console.WriteLine($"[GATEWAY]: {byeAck}");
-                        break;
-                    }
-
-                    if (cmd == "VIDEO")
-                    {
-                        // 4.1 Início do vídeo por TCP
-                        string videoStartMsg = $"VIDEO_START|{sensorId}|{zona}";
-                        string? videoStartAck = await EnviarEReceberTcpAsync(writer, reader, videoStartMsg);
-                        Console.WriteLine($"[GATEWAY]: {videoStartAck}");
-
-                        if (videoStartAck == null || !videoStartAck.StartsWith("ACK|VIDEO_START"))
-                        {
-                            Console.WriteLine("[ERRO] Gateway não aceitou o início do vídeo.");
-                            continue;
-                        }
-
-                        // 4.2 Dados do vídeo por UDP
-                        try
-                        {
-                            using UdpClient udpClient = new UdpClient();
-                            IPEndPoint remoteEP = new IPEndPoint(IPAddress.Parse(gatewayIP), portaUdpVideo);
-
-                            Console.WriteLine("[UDP] Streaming iniciado...");
-
-                            for (int i = 0; i < 50; i++)
-                            {
-                                if (!isRunning)
-                                    break;
-
-                                string frameData = $"VIDEO_FRAME|{sensorId}|{zona}|frame{i}";
-                                byte[] data = Encoding.UTF8.GetBytes(frameData);
-
-                                await udpClient.SendAsync(data, data.Length, remoteEP);
-                                await Task.Delay(100);
-                            }
-
-                            Console.WriteLine("[UDP] Streaming terminado.");
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[ERRO UDP]: {ex.Message}");
-                        }
-
-                        // 4.3 Fim do vídeo por TCP
-                        string videoEndMsg = $"VIDEO_END|{sensorId}|{zona}";
-                        string? videoEndAck = await EnviarEReceberTcpAsync(writer, reader, videoEndMsg);
-                        Console.WriteLine($"[GATEWAY]: {videoEndAck}");
-
-                        continue;
-                    }
-
-                    // 5. Envio de dados ambientais
-                    if (input.Contains(":"))
-                    {
-                        string[] parts = input.Split(':', 2);
-
-                        if (parts.Length == 2)
-                        {
-                            string tipo = parts[0].Trim().ToUpperInvariant();
-                            string valor = parts[1].Trim();
-
-                            string dataMsg = $"DATA|{sensorId}|{zona}|{tipo}|{valor}";
-                            string? ack = await EnviarEReceberTcpAsync(writer, reader, dataMsg);
-
-                            Console.WriteLine($"[ENVIADO]: {dataMsg}");
-                            Console.WriteLine($"[GATEWAY]: {ack}");
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine("Formato inválido. Use 'TIPO:VALOR', 'VIDEO' ou 'SAIR'.");
-                    }
-                }
+                await Task.WhenAll(dadosTask, heartbeatTask, videoTask);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                Console.WriteLine($"[ERRO]: {ex.Message}");
+                // esperado — cancelámos nós próprios
             }
 
-            Console.WriteLine("Saindo...");
+            // 8) Publicar VIDEO_END e BYE antes de sair
+            await PublicarStatusAsync(channel, "VIDEO_END");
+            Console.WriteLine("[VIDEO_END] enviado.");
+            await PublicarStatusAsync(channel, "BYE");
+            Console.WriteLine("[BYE] enviado. Sensor terminado.");
         }
 
-        // Envia uma mensagem TCP e lê a resposta correspondente
-        // Usa semáforo para evitar conflitos entre heartbeat e interface principal
-        static async Task<string?> EnviarEReceberTcpAsync(StreamWriter writer, StreamReader reader, string mensagem)
+        // ----------------------------------------------------------------
+        // Tarefa de fundo: publica medições aleatórias periodicamente
+        // ----------------------------------------------------------------
+        private static async Task TarefaPublicarDadosAsync(IChannel channel, CancellationToken ct)
         {
-            await tcpSemaphore.WaitAsync();
+            while (isRunning && !ct.IsCancellationRequested)
+            {
+                try
+                {
+                    // Escolher um tipo aleatório dos suportados por este sensor
+                    string tipo = tipos[rng.Next(tipos.Count)];
+                    (double valor, string unidade) = GerarValor(tipo);
 
-            try
-            {
-                await writer.WriteLineAsync(mensagem);
-                return await reader.ReadLineAsync();
+                    // Construir payload JSON
+                    var payload = new
+                    {
+                        type = "DATA",
+                        sensorId,
+                        zona,
+                        tipo,
+                        valor = Math.Round(valor, 2),
+                        unidade,
+                        timestamp = DateTime.UtcNow.ToString("o")
+                    };
+
+                    // Routing key: substitui '.' por '_' nos tipos (ex: PM2.5 -> PM2_5)
+                    // porque o RabbitMQ usa '.' como separador hierárquico
+                    string routingKey = $"sensor.{zona}.{tipo.Replace('.', '_')}";
+
+                    await PublicarAsync(channel, routingKey, payload);
+                    Console.WriteLine($"[DATA] {routingKey} -> {payload.valor} {payload.unidade}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERRO DATA] {ex.Message}");
+                }
+
+                try { await Task.Delay(IntervaloDados, ct); }
+                catch (TaskCanceledException) { break; }
             }
-            finally
+        }
+
+        // ----------------------------------------------------------------
+        // Tarefa de fundo: publica frames de vídeo simulados periodicamente
+        // ----------------------------------------------------------------
+        private static async Task TarefaPublicarVideoAsync(IChannel channel, CancellationToken ct)
+        {
+            while (isRunning && !ct.IsCancellationRequested)
             {
-                tcpSemaphore.Release();
+                try { await Task.Delay(IntervaloVideo, ct); }
+                catch (TaskCanceledException) { break; }
+
+                if (!isRunning) break;
+
+                try
+                {
+                    int id = System.Threading.Interlocked.Increment(ref frameCounter);
+
+                    // Simulação de conteúdo de frame: string base64 de bytes aleatórios
+                    byte[] frameBytes = new byte[64];
+                    rng.NextBytes(frameBytes);
+                    string conteudo = Convert.ToBase64String(frameBytes);
+
+                    var payload = new
+                    {
+                        type = "VIDEO_FRAME",
+                        sensorId,
+                        zona,
+                        frameId = id,
+                        conteudo,
+                        timestamp = DateTime.UtcNow.ToString("o")
+                    };
+
+                    string routingKey = $"sensor.{zona}.VIDEO";
+                    await PublicarAsync(channel, routingKey, payload);
+                    Console.WriteLine($"[VIDEO] frame #{id} -> {routingKey}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERRO VIDEO] {ex.Message}");
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Tarefa de fundo: publica heartbeats periódicos
+        // ----------------------------------------------------------------
+        private static async Task TarefaHeartbeatAsync(IChannel channel, CancellationToken ct)
+        {
+            while (isRunning && !ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(IntervaloHeartbeat, ct); }
+                catch (TaskCanceledException) { break; }
+
+                if (!isRunning) break;
+
+                try
+                {
+                    await PublicarStatusAsync(channel, "HEARTBEAT");
+                    Console.WriteLine("[HEARTBEAT] enviado.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERRO HEARTBEAT] {ex.Message}");
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Publica uma mensagem de controlo (REGISTER/HEARTBEAT/BYE)
+        // ----------------------------------------------------------------
+        private static async Task PublicarStatusAsync(IChannel channel, string tipoMsg, object? extra = null)
+        {
+            // Construir payload base. Se 'extra' for fornecido (ex: lista de tipos no REGISTER),
+            // mistura os seus campos no JSON.
+            var baseObj = new Dictionary<string, object?>
+            {
+                ["type"] = tipoMsg,
+                ["sensorId"] = sensorId,
+                ["zona"] = zona,
+                ["timestamp"] = DateTime.UtcNow.ToString("o")
+            };
+
+            if (extra != null)
+            {
+                foreach (var prop in extra.GetType().GetProperties())
+                {
+                    baseObj[prop.Name] = prop.GetValue(extra);
+                }
+            }
+
+            string routingKey = $"sensor.{zona}.STATUS";
+            await PublicarAsync(channel, routingKey, baseObj);
+        }
+
+        // ----------------------------------------------------------------
+        // Publicação genérica no exchange
+        // ----------------------------------------------------------------
+        private static async Task PublicarAsync(IChannel channel, string routingKey, object payload)
+        {
+            string json = JsonSerializer.Serialize(payload);
+            byte[] body = Encoding.UTF8.GetBytes(json);
+
+            var props = new BasicProperties
+            {
+                ContentType = "application/json",
+                DeliveryMode = DeliveryModes.Persistent  // mensagens sobrevivem se o broker reiniciar
+            };
+
+            await channel.BasicPublishAsync(
+                exchange: ExchangeName,
+                routingKey: routingKey,
+                mandatory: false,
+                basicProperties: props,
+                body: body);
+        }
+
+        // ----------------------------------------------------------------
+        // Geração de valores realistas por tipo de sensor
+        // ----------------------------------------------------------------
+        private static (double valor, string unidade) GerarValor(string tipo)
+        {
+            return tipo.ToUpperInvariant() switch
+            {
+                "TEMP"      => (rng.NextDouble() * 25 + 5, "°C"),       // 5 a 30 °C
+                "HUMIDADE"  => (rng.NextDouble() * 60 + 30, "%"),       // 30 a 90 %
+                "PM2.5"     => (rng.NextDouble() * 100 + 5, "µg/m³"),   // 5 a 105 µg/m³
+                "NO2"       => (rng.NextDouble() * 200 + 10, "µg/m³"),  // 10 a 210 µg/m³
+                "RUIDO"     => (rng.NextDouble() * 40 + 40, "dB"),      // 40 a 80 dB
+                _           => (rng.NextDouble() * 100, "u.a.")        // fallback genérico
+            };
+        }
+
+        // ----------------------------------------------------------------
+        // Parser simples de argumentos: --id X --zona Y --tipos A,B,C
+        // ----------------------------------------------------------------
+        private static void ParseArgs(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                switch (args[i].ToLowerInvariant())
+                {
+                    case "--id":
+                        sensorId = args[++i];
+                        break;
+                    case "--zona":
+                        zona = args[++i];
+                        break;
+                    case "--tipos":
+                        tipos = new List<string>(args[++i].Split(','));
+                        break;
+                }
             }
         }
     }
