@@ -1,307 +1,319 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
+using Grpc.Net.Client;
+using GrpcAnalise;
 
 namespace Servidor
 {
     class Program
     {
-        // Porta TCP do servidor (usada pelo Gateway para se ligar)
-        private static int portaTcp = 6000;
+        private const int PortaTcp = 6000;
+        private const string GrpcUrl = "http://localhost:50051";
+        private static readonly string DirDados = "dados";
+        private static readonly string DbPath = Path.Combine(DirDados, "sensor_data.db");
 
-        // Diretório onde os ficheiros de dados são guardados
-        private static string dirDados = "dados";
-
-        // Mutex global para acesso concorrente por ficheiro
-        // Chave: nome do ficheiro; Valor: mutex desse ficheiro
         private static readonly Dictionary<string, Mutex> fileMutexes = new();
         private static readonly object fileMutexesMeta = new();
-
-        // Sessões de vídeo ativas: sensorId -> zona
         private static readonly Dictionary<string, string> sessoesVideo = new();
         private static readonly object videoLock = new();
+        private static ServicoAnalise.ServicoAnaliseClient? grpcClient;
 
         static async Task Main(string[] args)
         {
-            // Criar diretório de dados se não existir
-            Directory.CreateDirectory(dirDados);
+            AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
 
-            TcpListener listener = new TcpListener(IPAddress.Any, portaTcp);
+            Directory.CreateDirectory(DirDados);
+            InicializarBD();
+            InicializarGrpc();
+
+            _ = Task.Run(() => AnalisePeriodicaAsync(CancellationToken.None));
+
+            var listener = new TcpListener(IPAddress.Any, PortaTcp);
             listener.Start();
 
-            Console.WriteLine($"[SERVIDOR] À escuta na porta TCP {portaTcp}...");
-            Console.WriteLine($"[SERVIDOR] Dados guardados em: {Path.GetFullPath(dirDados)}");
+            Console.WriteLine($"[SERVIDOR] À escuta na porta {PortaTcp}");
+            Console.WriteLine($"[SERVIDOR] Base de dados: {Path.GetFullPath(DbPath)}");
+            Console.WriteLine($"[SERVIDOR] Análise gRPC: {GrpcUrl}");
 
             while (true)
             {
-                TcpClient clienteGateway = await listener.AcceptTcpClientAsync();
-                Console.WriteLine($"[SERVIDOR] Gateway ligado: {clienteGateway.Client.RemoteEndPoint}");
-                _ = Task.Run(() => TratarGateway(clienteGateway));
+                var cliente = await listener.AcceptTcpClientAsync();
+                Console.WriteLine($"[SERVIDOR] Gateway ligado: {cliente.Client.RemoteEndPoint}");
+                _ = Task.Run(() => TratarGateway(cliente));
+            }
+        }
+
+        static void InicializarBD()
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+
+            using var pragmaCmd = conn.CreateCommand();
+            pragmaCmd.CommandText = "PRAGMA journal_mode=WAL;";
+            pragmaCmd.ExecuteNonQuery();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS medicoes (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp  TEXT NOT NULL,
+                    sensor_id  TEXT NOT NULL,
+                    zona       TEXT NOT NULL,
+                    tipo       TEXT NOT NULL,
+                    valor      REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS analises (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp_analise TEXT NOT NULL,
+                    tipo             TEXT NOT NULL,
+                    zona             TEXT NOT NULL,
+                    num_medicoes     INTEGER NOT NULL,
+                    media            REAL NOT NULL,
+                    minimo           REAL NOT NULL,
+                    maximo           REAL NOT NULL,
+                    desvio_padrao    REAL NOT NULL,
+                    nivel_risco      TEXT NOT NULL,
+                    descricao_risco  TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_med_tipo_zona  ON medicoes(tipo, zona);
+                CREATE INDEX IF NOT EXISTS idx_med_timestamp  ON medicoes(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_anal_tipo_zona ON analises(tipo, zona);
+            ";
+            cmd.ExecuteNonQuery();
+
+            Console.WriteLine("[SERVIDOR] Base de dados inicializada.");
+        }
+
+        static void InicializarGrpc()
+        {
+            try
+            {
+                var channel = GrpcChannel.ForAddress(GrpcUrl);
+                grpcClient = new ServicoAnalise.ServicoAnaliseClient(channel);
+                Console.WriteLine($"[SERVIDOR] Cliente gRPC pronto ({GrpcUrl})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SERVIDOR] Aviso: gRPC não inicializado — {ex.Message}");
             }
         }
 
         static async Task TratarGateway(TcpClient clienteGateway)
         {
+            string gatewayId = "?";
+
             using (clienteGateway)
-            using (NetworkStream stream = clienteGateway.GetStream())
-            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
-            using (StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true })
+            using (var stream = clienteGateway.GetStream())
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            using (var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true })
             {
                 try
                 {
-                    string? mensagem = await reader.ReadLineAsync();
-                    if (mensagem == null)
+                    string? mensagem;
+                    while ((mensagem = await reader.ReadLineAsync()) != null)
                     {
-                        Console.WriteLine("[SERVIDOR] Ligação encerrada sem mensagem.");
-                        return;
-                    }
+                        var partes = mensagem.Split('|');
+                        var cmd = partes[0].ToUpperInvariant();
 
-                    Console.WriteLine($"[SERVIDOR] Recebido: {mensagem}");
+                        switch (cmd)
+                        {
+                            case "HELLO_GATEWAY":
+                                await writer.WriteLineAsync("ACK|HELLO_GATEWAY");
+                                Console.WriteLine($"[SERVIDOR] HELLO_GATEWAY recebido.");
+                                break;
 
-                    string[] partes = mensagem.Split('|');
-                    if (partes.Length == 0)
-                    {
-                        await writer.WriteLineAsync("ERROR|FORMAT");
-                        return;
-                    }
+                            case "GATEWAY_REGISTER":
+                                if (partes.Length >= 2) gatewayId = partes[1];
+                                await writer.WriteLineAsync("ACK|GATEWAY_REGISTER");
+                                Console.WriteLine($"[SERVIDOR] Gateway registado: {gatewayId}");
+                                break;
 
-                    string comando = partes[0].ToUpperInvariant();
+                            case "SESSION_START":
+                                if (partes.Length >= 2) gatewayId = partes[1];
+                                await writer.WriteLineAsync("ACK|SESSION_START");
+                                Console.WriteLine($"[SERVIDOR] Sessão iniciada: {gatewayId}");
+                                break;
 
-                    switch (comando)
-                    {
-                        // ----------------------------------------------------------------
-                        // HELLO_GATEWAY
-                        // Primeiro passo do handshake do Gateway
-                        // ----------------------------------------------------------------
-                        case "HELLO_GATEWAY":
-                            Console.WriteLine("[SERVIDOR] HELLO_GATEWAY recebido.");
-                            await writer.WriteLineAsync("ACK|HELLO_GATEWAY");
-                            break;
+                            case "STORE":
+                                if (partes.Length < 5) { await writer.WriteLineAsync("ERROR|STORE_FORMAT"); break; }
+                                string sId = partes[1], zona = partes[2], tipo = partes[3], valor = partes[4];
+                                string ts = DateTime.Now.ToString("s");
+                                GuardarMedicaoCSV(Path.Combine(DirDados, $"{tipo.ToUpper()}.csv"), sId, zona, tipo, valor, ts);
+                                GuardarMedicaoDB(sId, zona, tipo, valor, ts);
+                                Console.WriteLine($"[SERVIDOR] STORE: {sId}|{zona}|{tipo}={valor}");
+                                await writer.WriteLineAsync("ACK|STORE");
+                                break;
 
-                        // ----------------------------------------------------------------
-                        // GATEWAY_REGISTER|gatewayId
-                        // Registo do Gateway no Servidor
-                        // ----------------------------------------------------------------
-                        case "GATEWAY_REGISTER":
-                            if (partes.Length < 2)
-                            {
-                                await writer.WriteLineAsync("ERROR|GATEWAY_REGISTER_FORMAT");
-                                return;
-                            }
-                            Console.WriteLine($"[SERVIDOR] Gateway registado: {partes[1]}");
-                            await writer.WriteLineAsync("ACK|GATEWAY_REGISTER");
-                            break;
+                            case "VIDEO_START":
+                                if (partes.Length < 3) { await writer.WriteLineAsync("ERROR|VIDEO_START_FORMAT"); break; }
+                                lock (videoLock) { sessoesVideo[partes[1]] = partes[2]; }
+                                await writer.WriteLineAsync("ACK|VIDEO_START");
+                                Console.WriteLine($"[SERVIDOR] VIDEO_START: sensor={partes[1]} zona={partes[2]}");
+                                break;
 
-                        // ----------------------------------------------------------------
-                        // SESSION_START|gatewayId
-                        // Início de sessão do Gateway — último passo do handshake
-                        // ----------------------------------------------------------------
-                        case "SESSION_START":
-                            if (partes.Length < 2)
-                            {
-                                await writer.WriteLineAsync("ERROR|SESSION_START_FORMAT");
-                                return;
-                            }
-                            Console.WriteLine($"[SERVIDOR] Sessão iniciada para gateway: {partes[1]}");
-                            await writer.WriteLineAsync("ACK|SESSION_START");
-                            break;
+                            case "VIDEO_END":
+                                if (partes.Length < 2) { await writer.WriteLineAsync("ERROR|VIDEO_END_FORMAT"); break; }
+                                lock (videoLock) { sessoesVideo.Remove(partes[1]); }
+                                await writer.WriteLineAsync("ACK|VIDEO_END");
+                                Console.WriteLine($"[SERVIDOR] VIDEO_END: sensor={partes[1]}");
+                                break;
 
-                        // ----------------------------------------------------------------
-                        // STORE|sensorId|zona|tipo|valor
-                        // Guarda medição ambiental em ficheiro CSV por tipo de dado
-                        // ----------------------------------------------------------------
-                        case "STORE":
-                            if (partes.Length < 5)
-                            {
-                                await writer.WriteLineAsync("ERROR|STORE_FORMAT");
-                                return;
-                            }
+                            case "VIDEO_FRAME":
+                                if (partes.Length < 4) { await writer.WriteLineAsync("ERROR|VIDEO_FRAME_FORMAT"); break; }
+                                bool ativa;
+                                lock (videoLock) { ativa = sessoesVideo.ContainsKey(partes[1]); }
+                                if (!ativa) { await writer.WriteLineAsync("ERROR|NO_VIDEO_SESSION"); break; }
+                                GuardarFrameCSV(Path.Combine(DirDados, "VIDEO_FRAMES.csv"), partes[1], partes[2], partes[3], DateTime.Now.ToString("s"));
+                                await writer.WriteLineAsync("ACK|VIDEO_FRAME");
+                                break;
 
-                            string sensorId = partes[1];
-                            string zona = partes[2];
-                            string tipo = partes[3];
-                            string valor = partes[4];
-                            string timestamp = DateTime.Now.ToString("s"); // ISO 8601
-
-                            // Guardar em ficheiro: dados/<TIPO>.csv
-                            string nomeFicheiro = Path.Combine(dirDados, $"{tipo.ToUpper()}.csv");
-
-                            GuardarMedicao(nomeFicheiro, sensorId, zona, tipo, valor, timestamp);
-
-                            Console.WriteLine($"[SERVIDOR] STORE: {sensorId} | {zona} | {tipo} = {valor} @ {timestamp}");
-                            await writer.WriteLineAsync("ACK|STORE");
-                            break;
-
-                        // ----------------------------------------------------------------
-                        // VIDEO_START|sensorId|zona
-                        // Regista início de sessão de vídeo
-                        // ----------------------------------------------------------------
-                        case "VIDEO_START":
-                            if (partes.Length < 3)
-                            {
-                                await writer.WriteLineAsync("ERROR|VIDEO_START_FORMAT");
-                                return;
-                            }
-
-                            string vsId = partes[1];
-                            string vsZona = partes[2];
-
-                            lock (videoLock)
-                            {
-                                sessoesVideo[vsId] = vsZona;
-                            }
-
-                            Console.WriteLine($"[SERVIDOR] VIDEO_START: sensor={vsId} zona={vsZona}");
-                            await writer.WriteLineAsync("ACK|VIDEO_START");
-                            break;
-
-                        // ----------------------------------------------------------------
-                        // VIDEO_END|sensorId|zona
-                        // Regista fim de sessão de vídeo
-                        // ----------------------------------------------------------------
-                        case "VIDEO_END":
-                            if (partes.Length < 3)
-                            {
-                                await writer.WriteLineAsync("ERROR|VIDEO_END_FORMAT");
-                                return;
-                            }
-
-                            string veId = partes[1];
-
-                            lock (videoLock)
-                            {
-                                sessoesVideo.Remove(veId);
-                            }
-
-                            Console.WriteLine($"[SERVIDOR] VIDEO_END: sensor={veId}");
-                            await writer.WriteLineAsync("ACK|VIDEO_END");
-                            break;
-
-                        // ----------------------------------------------------------------
-                        // VIDEO_FRAME|sensorId|zona|conteudo
-                        // Regista frame de vídeo (simulação — guarda metadados em CSV)
-                        // ----------------------------------------------------------------
-                        case "VIDEO_FRAME":
-                            if (partes.Length < 4)
-                            {
-                                await writer.WriteLineAsync("ERROR|VIDEO_FRAME_FORMAT");
-                                return;
-                            }
-
-                            string vfId = partes[1];
-                            string vfZona = partes[2];
-                            string vfConteudo = partes[3];
-                            string vfTimestamp = DateTime.Now.ToString("s");
-
-                            // Verificar se sessão de vídeo está ativa
-                            bool sessaoAtiva;
-                            lock (videoLock)
-                            {
-                                sessaoAtiva = sessoesVideo.ContainsKey(vfId);
-                            }
-
-                            if (!sessaoAtiva)
-                            {
-                                Console.WriteLine($"[SERVIDOR] VIDEO_FRAME ignorado: sessão não iniciada para {vfId}");
-                                await writer.WriteLineAsync("ERROR|NO_VIDEO_SESSION");
-                                return;
-                            }
-
-                            // Guardar metadados do frame em ficheiro de log de vídeo
-                            string ficheiroVideo = Path.Combine(dirDados, "VIDEO_FRAMES.csv");
-                            GuardarFrame(ficheiroVideo, vfId, vfZona, vfConteudo, vfTimestamp);
-
-                            Console.WriteLine($"[SERVIDOR] VIDEO_FRAME: {vfId} | frame={vfConteudo} @ {vfTimestamp}");
-                            await writer.WriteLineAsync("ACK|VIDEO_FRAME");
-                            break;
-
-                        default:
-                            Console.WriteLine($"[SERVIDOR] Comando desconhecido: {comando}");
-                            await writer.WriteLineAsync("ERROR|UNKNOWN_COMMAND");
-                            break;
+                            default:
+                                Console.WriteLine($"[SERVIDOR] Comando desconhecido: {cmd}");
+                                await writer.WriteLineAsync("ERROR|UNKNOWN_COMMAND");
+                                break;
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[SERVIDOR] Erro ao tratar gateway: {ex.Message}");
+                    Console.WriteLine($"[SERVIDOR] Erro [{gatewayId}]: {ex.Message}");
                 }
             }
 
-            Console.WriteLine("[SERVIDOR] Ligação com gateway encerrada.");
+            Console.WriteLine($"[SERVIDOR] Gateway desligado: {gatewayId}");
         }
 
-        // -----------------------------------------------------------------------
-        // Guarda uma medição ambiental em CSV com mutex por ficheiro
-        // Formato: timestamp,sensor_id,zona,tipo,valor
-        // -----------------------------------------------------------------------
-        static void GuardarMedicao(string ficheiro, string sensorId, string zona,
-                                   string tipo, string valor, string timestamp)
+        static void GuardarMedicaoDB(string sensorId, string zona, string tipo, string valor, string timestamp)
         {
-            Mutex mutex = ObterMutex(ficheiro);
-            mutex.WaitOne();
+            if (!double.TryParse(valor,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out double valorDouble)) return;
 
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO medicoes (timestamp,sensor_id,zona,tipo,valor) VALUES ($ts,$sid,$zona,$tipo,$val)";
+            cmd.Parameters.AddWithValue("$ts",   timestamp);
+            cmd.Parameters.AddWithValue("$sid",  sensorId);
+            cmd.Parameters.AddWithValue("$zona", zona);
+            cmd.Parameters.AddWithValue("$tipo", tipo);
+            cmd.Parameters.AddWithValue("$val",  valorDouble);
+            cmd.ExecuteNonQuery();
+        }
+
+        static void GuardarResultadoDB(ResultadoAnalise r)
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO analises
+                (timestamp_analise,tipo,zona,num_medicoes,media,minimo,maximo,desvio_padrao,nivel_risco,descricao_risco)
+                VALUES ($ts,$tipo,$zona,$n,$media,$min,$max,$dp,$risco,$desc)";
+            cmd.Parameters.AddWithValue("$ts",    r.TimestampAnalise);
+            cmd.Parameters.AddWithValue("$tipo",  r.Tipo);
+            cmd.Parameters.AddWithValue("$zona",  r.Zona);
+            cmd.Parameters.AddWithValue("$n",     r.NumMedicoes);
+            cmd.Parameters.AddWithValue("$media", r.Media);
+            cmd.Parameters.AddWithValue("$min",   r.Minimo);
+            cmd.Parameters.AddWithValue("$max",   r.Maximo);
+            cmd.Parameters.AddWithValue("$dp",    r.DesvioPadrao);
+            cmd.Parameters.AddWithValue("$risco", r.NivelRisco);
+            cmd.Parameters.AddWithValue("$desc",  r.DescricaoRisco);
+            cmd.ExecuteNonQuery();
+        }
+
+        static async Task AnalisePeriodicaAsync(CancellationToken ct)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+
+            while (!ct.IsCancellationRequested)
+            {
+                if (grpcClient != null)
+                {
+                    foreach (var zona in ObterZonasAtivas())
+                        foreach (var tipo in new[] { "TEMP", "HUMIDADE", "PM2.5", "NO2", "RUIDO" })
+                        {
+                            try
+                            {
+                                var pedido = new PedidoAnalise { Tipo = tipo, Zona = zona, UltimasN = 100 };
+                                var resultado = await grpcClient.AnalisarDadosAsync(pedido);
+                                if (resultado.Sucesso)
+                                {
+                                    GuardarResultadoDB(resultado);
+                                    Console.WriteLine($"[ANÁLISE] {tipo}/{zona}: média={resultado.Media:F2} risco={resultado.NivelRisco}");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[ANÁLISE] Erro {tipo}/{zona}: {ex.Message}");
+                            }
+                        }
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+            }
+        }
+
+        static string[] ObterZonasAtivas()
+        {
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={DbPath}");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT DISTINCT zona FROM medicoes";
+                using var reader = cmd.ExecuteReader();
+                var lista = new List<string>();
+                while (reader.Read()) lista.Add(reader.GetString(0));
+                return lista.Count > 0 ? lista.ToArray() : new[] { "ZONA_ESCOLAR" };
+            }
+            catch { return new[] { "ZONA_ESCOLAR" }; }
+        }
+
+        static void GuardarMedicaoCSV(string ficheiro, string sensorId, string zona,
+                                      string tipo, string valor, string timestamp)
+        {
+            var mutex = ObterMutex(ficheiro);
+            mutex.WaitOne();
             try
             {
                 bool existe = File.Exists(ficheiro);
-
-                using StreamWriter sw = new StreamWriter(ficheiro, append: true, Encoding.UTF8);
-
-                // Cabeçalho apenas na primeira linha
-                if (!existe)
-                    sw.WriteLine("timestamp,sensor_id,zona,tipo,valor");
-
+                using var sw = new StreamWriter(ficheiro, append: true, Encoding.UTF8);
+                if (!existe) sw.WriteLine("timestamp,sensor_id,zona,tipo,valor");
                 sw.WriteLine($"{timestamp},{sensorId},{zona},{tipo},{valor}");
             }
-            finally
-            {
-                mutex.ReleaseMutex();
-            }
+            finally { mutex.ReleaseMutex(); }
         }
 
-        // -----------------------------------------------------------------------
-        // Guarda metadados de frame de vídeo em CSV com mutex por ficheiro
-        // Formato: timestamp,sensor_id,zona,frame
-        // -----------------------------------------------------------------------
-        static void GuardarFrame(string ficheiro, string sensorId, string zona,
-                                 string conteudo, string timestamp)
+        static void GuardarFrameCSV(string ficheiro, string sensorId, string zona,
+                                    string conteudo, string timestamp)
         {
-            Mutex mutex = ObterMutex(ficheiro);
+            var mutex = ObterMutex(ficheiro);
             mutex.WaitOne();
-
             try
             {
                 bool existe = File.Exists(ficheiro);
-
-                using StreamWriter sw = new StreamWriter(ficheiro, append: true, Encoding.UTF8);
-
-                if (!existe)
-                    sw.WriteLine("timestamp,sensor_id,zona,frame");
-
+                using var sw = new StreamWriter(ficheiro, append: true, Encoding.UTF8);
+                if (!existe) sw.WriteLine("timestamp,sensor_id,zona,frame");
                 sw.WriteLine($"{timestamp},{sensorId},{zona},{conteudo}");
             }
-            finally
-            {
-                mutex.ReleaseMutex();
-            }
+            finally { mutex.ReleaseMutex(); }
         }
 
-        // -----------------------------------------------------------------------
-        // Obtém (ou cria) um mutex associado a cada ficheiro
-        // Garante acesso sequencial por ficheiro mesmo com múltiplos gateways
-        // -----------------------------------------------------------------------
         static Mutex ObterMutex(string ficheiro)
         {
             lock (fileMutexesMeta)
             {
                 if (!fileMutexes.ContainsKey(ficheiro))
                     fileMutexes[ficheiro] = new Mutex();
-
                 return fileMutexes[ficheiro];
             }
         }

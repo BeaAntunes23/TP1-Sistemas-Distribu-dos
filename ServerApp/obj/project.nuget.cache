@@ -1,8 +1,22 @@
 {
   "version": 2,
-  "dgSpecHash": "Go9dhOSKHh0=",
+  "dgSpecHash": "2qDsmMkn4sA=",
   "success": true,
-  "projectFilePath": "C:\\Users\\salom\\Source\\Repos\\TP1-Sistemas-Distribu-dos\\ServerApp\\ServerApp.csproj",
-  "expectedPackageFiles": [],
+  "projectFilePath": "C:\\Users\\salom\\OneDrive - UTAD\\Documentos\\Educação & Projetos\\UTAD - LEI\\3º ANO\\2º SEM\\SISTEMAS DISTRIBUÍDOS\\Trabalho Prático 3\\TP1-Sistemas-Distribu-dos\\ServerApp\\ServerApp.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\salom\\.nuget\\packages\\google.protobuf\\3.28.2\\google.protobuf.3.28.2.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\grpc.core.api\\2.65.0\\grpc.core.api.2.65.0.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\grpc.net.client\\2.65.0\\grpc.net.client.2.65.0.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\grpc.net.common\\2.65.0\\grpc.net.common.2.65.0.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\grpc.tools\\2.65.0\\grpc.tools.2.65.0.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\microsoft.data.sqlite\\9.0.5\\microsoft.data.sqlite.9.0.5.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\microsoft.data.sqlite.core\\9.0.5\\microsoft.data.sqlite.core.9.0.5.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\6.0.0\\microsoft.extensions.logging.abstractions.6.0.0.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\sqlitepclraw.bundle_e_sqlite3\\2.1.10\\sqlitepclraw.bundle_e_sqlite3.2.1.10.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\sqlitepclraw.core\\2.1.10\\sqlitepclraw.core.2.1.10.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\sqlitepclraw.lib.e_sqlite3\\2.1.10\\sqlitepclraw.lib.e_sqlite3.2.1.10.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\sqlitepclraw.provider.e_sqlite3\\2.1.10\\sqlitepclraw.provider.e_sqlite3.2.1.10.nupkg.sha512",
+    "C:\\Users\\salom\\.nuget\\packages\\system.memory\\4.5.3\\system.memory.4.5.3.nupkg.sha512"
+  ],
   "logs": []
 }
