@@ -5,11 +5,14 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using System.Text.Json;
+using GrpcPreProcessamento;
+using Grpc.Net.Client;
 
 namespace Gateway
 {
@@ -24,10 +27,32 @@ namespace Gateway
 
     class SensorMensagem
     {
-        public string sensor_id { get; set; } = "";
-        public string zona { get; set; } = "";
-        public string tipo { get; set; } = "";
-        public double valor { get; set; }
+        [JsonPropertyName("type")]
+        public string Type { get; set; } = "";
+
+        [JsonPropertyName("sensorId")]
+        public string SensorId { get; set; } = "";
+
+        [JsonPropertyName("zona")]
+        public string Zona { get; set; } = "";
+
+        [JsonPropertyName("tipo")]
+        public string Tipo { get; set; } = "";
+
+        [JsonPropertyName("valor")]
+        public double Valor { get; set; }
+
+        [JsonPropertyName("frameId")]
+        public int FrameId { get; set; }
+
+        [JsonPropertyName("conteudo")]
+        public string Conteudo { get; set; } = "";
+
+        [JsonPropertyName("timestamp")]
+        public string Timestamp { get; set; } = "";
+
+        [JsonPropertyName("tipos")]
+        public List<string>? Tipos { get; set; }
     }
 
     static class GatewayFileMutex
@@ -38,7 +63,6 @@ namespace Gateway
     class Program
     {
         private static readonly object sensorLock = new object();
-
         private static Dictionary<string, SensorInfo> sensores = new();
 
         private static string ipServidor = "127.0.0.1";
@@ -50,9 +74,24 @@ namespace Gateway
         private static string rabbitHost = "localhost";
         private static string exchangeName = "sensores_topic";
         private static string queueName = "gateway_zona_escolar";
+        private static IConnection? rabbitConnection;
+        private static IChannel? rabbitChannel;
+
+        // Ligação TCP persistente ao servidor
+        private static TcpClient? tcpCliente;
+        private static StreamReader? tcpReader;
+        private static StreamWriter? tcpWriter;
+        private static readonly SemaphoreSlim tcpSemaphore = new SemaphoreSlim(1, 1);
+
+        // Cliente gRPC de pré-processamento (porta 50052)
+        private const string GrpcPreProcessUrl = "http://localhost:50052";
+        private static ServicoPreProcessamento.ServicoPreProcessamentoClient? preProcessClient;
 
         static async Task Main(string[] args)
         {
+            // Necessário para gRPC sobre HTTP/2 sem TLS
+            AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+
             try
             {
                 CarregarSensores(ficheiroCsv);
@@ -64,94 +103,188 @@ namespace Gateway
                 return;
             }
 
-            string respostaInit = await InicializarLigacaoServidor();
-            if (!respostaInit.StartsWith("ACK"))
+            if (!await LigarAoServidor())
             {
-                Console.WriteLine("ERRO NA LIGAÇÃO AO SERVIDOR!");
-                Console.WriteLine($"Resposta: {respostaInit}");
+                Console.WriteLine("ERRO: não foi possível ligar ao servidor.");
                 Console.ReadKey();
                 return;
             }
 
-            Console.WriteLine("Ligação inicial com o servidor concluída com sucesso.");
+            string respostaInit = await InicializarHandshake();
+            if (!respostaInit.StartsWith("ACK"))
+            {
+                Console.WriteLine($"ERRO NA INICIALIZAÇÃO COM O SERVIDOR: {respostaInit}");
+                Console.ReadKey();
+                return;
+            }
+
+            Console.WriteLine("Ligação persistente ao servidor estabelecida.");
+
+            InicializarGrpcPreProcessamento();
 
             _ = Task.Run(() => MonitorizarHeartbeats());
 
-            SubscreverRabbitMq();
+            await SubscreverRabbitMqAsync();
 
-            Console.WriteLine("Gateway RabbitMQ ativo.");
-            Console.WriteLine("Pressiona ENTER para terminar.");
+            Console.WriteLine("Gateway RabbitMQ ativo. Pressiona ENTER para terminar.");
             Console.ReadLine();
+
+            tcpWriter?.Dispose();
+            tcpReader?.Dispose();
+            tcpCliente?.Dispose();
+            rabbitChannel?.Dispose();
+            rabbitConnection?.Dispose();
         }
 
-        static async Task<string> InicializarLigacaoServidor()
+        // Inicializa o canal gRPC para o serviço de pré-processamento.
+        // O canal é lazy — a ligação real só acontece na primeira chamada RPC.
+        static void InicializarGrpcPreProcessamento()
         {
             try
             {
-                string resposta1 = await EnviarParaServidor("HELLO_GATEWAY");
-                if (!resposta1.StartsWith("ACK"))
-                    return resposta1;
-
-                string resposta2 = await EnviarParaServidor($"GATEWAY_REGISTER|{gatewayId}");
-                if (!resposta2.StartsWith("ACK"))
-                    return resposta2;
-
-                string resposta3 = await EnviarParaServidor($"SESSION_START|{gatewayId}");
-                return resposta3;
+                var channel = GrpcChannel.ForAddress(GrpcPreProcessUrl);
+                preProcessClient = new ServicoPreProcessamento.ServicoPreProcessamentoClient(channel);
+                Console.WriteLine($"[GATEWAY] Cliente gRPC pré-processamento pronto ({GrpcPreProcessUrl})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Erro na inicialização com o servidor: {ex.Message}");
-                return "ERROR|INIT_SERVER";
+                Console.WriteLine($"[GATEWAY] Aviso: pré-processamento gRPC não inicializado — {ex.Message}");
             }
         }
 
-        static void CarregarSensores(string ficheiroCsv)
+        // Estabelece (ou reestabelece) a ligação TCP ao servidor
+        static async Task<bool> LigarAoServidor()
+        {
+            try
+            {
+                tcpCliente?.Dispose();
+                tcpCliente = new TcpClient();
+                await tcpCliente.ConnectAsync(IPAddress.Parse(ipServidor), portaServidor);
+
+                var stream = tcpCliente.GetStream();
+                tcpReader = new StreamReader(stream, Encoding.UTF8);
+                tcpWriter = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
+
+                Console.WriteLine($"[TCP] Ligado ao servidor {ipServidor}:{portaServidor}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TCP] Falha na ligação ao servidor: {ex.Message}");
+                tcpCliente = null;
+                return false;
+            }
+        }
+
+        // Envia o handshake inicial (HELLO → REGISTER → SESSION_START)
+        static async Task<string> InicializarHandshake()
+        {
+            string r1 = await EnviarMensagemDireto("HELLO_GATEWAY");
+            if (!r1.StartsWith("ACK")) return r1;
+
+            string r2 = await EnviarMensagemDireto($"GATEWAY_REGISTER|{gatewayId}");
+            if (!r2.StartsWith("ACK")) return r2;
+
+            return await EnviarMensagemDireto($"SESSION_START|{gatewayId}");
+        }
+
+        static async Task<string> EnviarMensagemDireto(string mensagem)
+        {
+            if (tcpWriter == null || tcpReader == null)
+                return "ERROR|NOT_CONNECTED";
+            try
+            {
+                await tcpWriter.WriteLineAsync(mensagem);
+                string? resposta = await tcpReader.ReadLineAsync();
+                return string.IsNullOrWhiteSpace(resposta) ? "ERROR|NO_RESPONSE" : resposta;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TCP] Erro ao enviar mensagem direta: {ex.Message}");
+                return "ERROR|SEND_FAILED";
+            }
+        }
+
+        static async Task<string> EnviarParaServidor(string mensagem)
+        {
+            await tcpSemaphore.WaitAsync();
+            try
+            {
+                if (tcpCliente == null || !tcpCliente.Connected)
+                {
+                    Console.WriteLine("[TCP] Ligação perdida — a reconectar...");
+                    if (!await LigarAoServidor())
+                        return "ERROR|SERVER_CONNECTION";
+
+                    string handshake = await InicializarHandshake();
+                    if (!handshake.StartsWith("ACK"))
+                    {
+                        Console.WriteLine($"[TCP] Re-handshake falhou: {handshake}");
+                        return "ERROR|HANDSHAKE_FAILED";
+                    }
+                    Console.WriteLine("[TCP] Reconexão ao servidor bem-sucedida.");
+                }
+
+                await tcpWriter!.WriteLineAsync(mensagem);
+                string? resposta = await tcpReader!.ReadLineAsync();
+
+                if (string.IsNullOrWhiteSpace(resposta))
+                {
+                    tcpCliente?.Dispose();
+                    tcpCliente = null;
+                    return "ERROR|CONNECTION_CLOSED";
+                }
+
+                return resposta;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TCP] Erro na comunicação: {ex.Message} — a repor ligação.");
+                tcpCliente?.Dispose();
+                tcpCliente = null;
+                return "ERROR|SERVER_CONNECTION";
+            }
+            finally
+            {
+                tcpSemaphore.Release();
+            }
+        }
+
+        static void CarregarSensores(string ficheiro)
         {
             GatewayFileMutex.SensoresCsvMutex.WaitOne();
-
             try
             {
                 lock (sensorLock)
                 {
                     sensores.Clear();
 
-                    if (!File.Exists(ficheiroCsv))
-                    {
+                    if (!File.Exists(ficheiro))
                         throw new FileNotFoundException(
-                            "O ficheiro de configuração dos sensores não foi encontrado.",
-                            ficheiroCsv
-                        );
-                    }
+                            "O ficheiro de configuração dos sensores não foi encontrado.", ficheiro);
 
-                    var linhas = File.ReadAllLines(ficheiroCsv);
-
-                    foreach (var linha in linhas.Skip(1))
+                    foreach (var linha in File.ReadAllLines(ficheiro).Skip(1))
                     {
-                        if (string.IsNullOrWhiteSpace(linha))
-                            continue;
+                        if (string.IsNullOrWhiteSpace(linha)) continue;
 
                         string[] partes = linha.Split(':');
-                        if (partes.Length < 5)
-                            continue;
+                        if (partes.Length < 5) continue;
 
-                        string id = partes[0].Trim();
-                        string estado = partes[1].Trim();
-                        string zona = partes[2].Trim();
-                        string tiposRaw = partes[3].Trim().Trim('[', ']');
+                        string id          = partes[0].Trim();
+                        string estado      = partes[1].Trim();
+                        string zona        = partes[2].Trim();
+                        string tiposRaw    = partes[3].Trim().Trim('[', ']');
                         string lastSyncRaw = string.Join(":", partes.Skip(4)).Trim();
 
                         DateTime? lastSync = null;
                         if (lastSyncRaw != "-" && DateTime.TryParse(lastSyncRaw, out DateTime dataLida))
-                        {
                             lastSync = dataLida;
-                        }
 
                         sensores[id] = new SensorInfo
                         {
-                            Id = id,
-                            Estado = estado,
-                            Zona = zona,
+                            Id         = id,
+                            Estado     = estado,
+                            Zona       = zona,
                             TiposDados = tiposRaw
                                 .Split(',', StringSplitOptions.RemoveEmptyEntries)
                                 .Select(t => t.Trim())
@@ -167,28 +300,23 @@ namespace Gateway
             }
         }
 
-        static void GuardarSensores(string ficheiroCsv)
+        static void GuardarSensores(string ficheiro)
         {
             GatewayFileMutex.SensoresCsvMutex.WaitOne();
-
             try
             {
                 lock (sensorLock)
                 {
-                    var linhas = new List<string>
-                    {
-                        "sensor_id:estado:zona:[tipos_dados]:last_sync"
-                    };
+                    var linhas = new List<string> { "sensor_id:estado:zona:[tipos_dados]:last_sync" };
 
                     foreach (var s in sensores.Values.OrderBy(x => x.Id))
                     {
-                        string tipos = "[" + string.Join(",", s.TiposDados) + "]";
+                        string tipos    = "[" + string.Join(",", s.TiposDados) + "]";
                         string lastSync = s.LastSync.HasValue ? s.LastSync.Value.ToString("s") : "-";
-
                         linhas.Add($"{s.Id}:{s.Estado}:{s.Zona}:{tipos}:{lastSync}");
                     }
 
-                    File.WriteAllLines(ficheiroCsv, linhas);
+                    File.WriteAllLines(ficheiro, linhas);
                 }
             }
             finally
@@ -197,143 +325,222 @@ namespace Gateway
             }
         }
 
-        static void SubscreverRabbitMq()
+        static async Task SubscreverRabbitMqAsync()
         {
-            var factory = new ConnectionFactory() { HostName = rabbitHost };
+            var factory = new ConnectionFactory { HostName = rabbitHost };
 
-            var connection = factory.CreateConnection();
-            var channel = connection.CreateModel();
+            rabbitConnection = await factory.CreateConnectionAsync();
+            rabbitChannel    = await rabbitConnection.CreateChannelAsync();
 
-            channel.ExchangeDeclare(exchange: exchangeName, type: ExchangeType.Topic);
+            await rabbitChannel.ExchangeDeclareAsync(
+                exchange:   exchangeName,
+                type:       ExchangeType.Topic,
+                durable:    true,
+                autoDelete: false);
 
-            channel.QueueDeclare(
-                queue: queueName,
-                durable: false,
-                exclusive: false,
+            await rabbitChannel.QueueDeclareAsync(
+                queue:      queueName,
+                durable:    false,
+                exclusive:  false,
                 autoDelete: false,
-                arguments: null
-            );
+                arguments:  null);
 
-            // Exemplo: subscrever tudo da ZONA_ESCOLAR
-            channel.QueueBind(
-                queue: queueName,
-                exchange: exchangeName,
-                routingKey: "zona.ZONA_ESCOLAR.*"
-            );
+            await rabbitChannel.QueueBindAsync(
+                queue:      queueName,
+                exchange:   exchangeName,
+                routingKey: "sensor.#");
 
-            var consumer = new EventingBasicConsumer(channel);
+            var consumer = new AsyncEventingBasicConsumer(rabbitChannel);
 
-            consumer.Received += (model, ea) =>
+            consumer.ReceivedAsync += async (_, ea) =>
             {
                 try
                 {
-                    var body = ea.Body.ToArray();
-                    string mensagem = Encoding.UTF8.GetString(body);
-
-                    Console.WriteLine($"\nMensagem recebida do RabbitMQ: {mensagem}");
-                    ProcessarMensagemRabbit(mensagem);
+                    string mensagem = Encoding.UTF8.GetString(ea.Body.ToArray());
+                    Console.WriteLine($"\n[RABBIT] {mensagem}");
+                    await ProcessarMensagemAsync(mensagem);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Erro ao receber mensagem RabbitMQ: {ex.Message}");
+                    Console.WriteLine($"[RABBIT] Erro: {ex.Message}");
                 }
             };
 
-            channel.BasicConsume(
-                queue: queueName,
-                autoAck: true,
-                consumer: consumer
-            );
+            await rabbitChannel.BasicConsumeAsync(
+                queue:    queueName,
+                autoAck:  true,
+                consumer: consumer);
         }
 
-        static void ProcessarMensagemRabbit(string json)
+        static async Task ProcessarMensagemAsync(string json)
         {
+            SensorMensagem? msg;
             try
             {
-                SensorMensagem? msg = JsonSerializer.Deserialize<SensorMensagem>(json);
-
-                if (msg == null)
-                {
-                    Console.WriteLine("Mensagem inválida.");
-                    return;
-                }
-
-                Console.WriteLine($"Sensor: {msg.sensor_id} | Zona: {msg.zona} | Tipo: {msg.tipo} | Valor: {msg.valor}");
-
-                SensorInfo? sensor;
-                lock (sensorLock)
-                {
-                    sensores.TryGetValue(msg.sensor_id, out sensor);
-                }
-
-                if (sensor == null)
-                {
-                    Console.WriteLine("Sensor não registado.");
-                    return;
-                }
-
-                if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine("Sensor não está ativo.");
-                    return;
-                }
-
-                if (!sensor.Zona.Equals(msg.zona, StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine("Zona inválida.");
-                    return;
-                }
-
-                if (!sensor.TiposDados.Contains(msg.tipo, StringComparer.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine("Tipo de dado não suportado.");
-                    return;
-                }
-
-                lock (sensorLock)
-                {
-                    sensores[msg.sensor_id].LastSync = DateTime.Now;
-                }
-
-                GuardarSensores(ficheiroCsv);
-
-                string mensagemServidor = $"STORE|{msg.sensor_id}|{msg.zona}|{msg.tipo}|{msg.valor}";
-                string respostaServidor = EnviarParaServidor(mensagemServidor).GetAwaiter().GetResult();
-
-                Console.WriteLine($"Resposta do servidor: {respostaServidor}");
+                msg = JsonSerializer.Deserialize<SensorMensagem>(json);
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"Erro ao processar JSON: {ex.Message}");
+                Console.WriteLine("[GATEWAY] JSON inválido — ignorado.");
+                return;
+            }
+
+            if (msg == null || string.IsNullOrEmpty(msg.SensorId))
+            {
+                Console.WriteLine("[GATEWAY] Mensagem sem sensorId — ignorada.");
+                return;
+            }
+
+            string sensorId = msg.SensorId;
+
+            switch (msg.Type.ToUpperInvariant())
+            {
+                case "DATA":
+                    await ProcessarDataAsync(sensorId, msg);
+                    break;
+
+                case "REGISTER":
+                    RegistarOuAtualizarSensor(sensorId, msg.Zona, msg.Tipos);
+                    break;
+
+                case "HEARTBEAT":
+                    AtualizarLastSync(sensorId);
+                    Console.WriteLine($"[HEARTBEAT] {sensorId}");
+                    break;
+
+                case "VIDEO_START":
+                    AtualizarLastSync(sensorId);
+                    string rVS = await EnviarParaServidor($"VIDEO_START|{sensorId}|{msg.Zona}");
+                    Console.WriteLine($"[VIDEO_START] {sensorId} → {rVS}");
+                    break;
+
+                case "VIDEO_FRAME":
+                    string rVF = await EnviarParaServidor($"VIDEO_FRAME|{sensorId}|{msg.Zona}|{msg.Conteudo}");
+                    Console.WriteLine($"[VIDEO_FRAME] {sensorId} frame#{msg.FrameId} → {rVF}");
+                    break;
+
+                case "VIDEO_END":
+                    string rVE = await EnviarParaServidor($"VIDEO_END|{sensorId}");
+                    Console.WriteLine($"[VIDEO_END] {sensorId} → {rVE}");
+                    break;
+
+                case "BYE":
+                    AtualizarLastSync(sensorId);
+                    Console.WriteLine($"[BYE] {sensorId}");
+                    break;
+
+                default:
+                    Console.WriteLine($"[GATEWAY] Tipo desconhecido: {msg.Type}");
+                    break;
             }
         }
 
-        static async Task<string> EnviarParaServidor(string mensagem)
+        static async Task ProcessarDataAsync(string sensorId, SensorMensagem msg)
         {
-            try
+            SensorInfo? sensor;
+            lock (sensorLock)
+                sensores.TryGetValue(sensorId, out sensor);
+
+            if (sensor == null)
             {
-                using TcpClient clienteServidor = new TcpClient();
-                await clienteServidor.ConnectAsync(IPAddress.Parse(ipServidor), portaServidor);
-
-                using NetworkStream stream = clienteServidor.GetStream();
-                using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
-                using StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-
-                Console.WriteLine($"A enviar para o servidor: {mensagem}");
-                await writer.WriteLineAsync(mensagem);
-
-                string? resposta = await reader.ReadLineAsync();
-
-                if (string.IsNullOrWhiteSpace(resposta))
-                    return "ERROR|NO_RESPONSE";
-
-                Console.WriteLine($"Resposta do servidor: {resposta}");
-                return resposta;
+                Console.WriteLine($"[DATA] Sensor {sensorId} não registado — ignorado.");
+                return;
             }
-            catch (Exception ex)
+            if (!sensor.Estado.Equals("ativo", StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine($"Erro ao enviar para o servidor: {ex.Message}");
-                return "ERROR|SERVER_CONNECTION";
+                Console.WriteLine($"[DATA] Sensor {sensorId} não está ativo.");
+                return;
+            }
+            if (!sensor.Zona.Equals(msg.Zona, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"[DATA] Zona inválida para {sensorId}: {msg.Zona}");
+                return;
+            }
+            if (!sensor.TiposDados.Contains(msg.Tipo, StringComparer.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"[DATA] Tipo '{msg.Tipo}' não suportado por {sensorId}.");
+                return;
+            }
+
+            AtualizarLastSync(sensorId);
+            GuardarSensores(ficheiroCsv);
+
+            // Pré-processamento via gRPC: normaliza tipo, converte unidades, valida intervalo.
+            // Se o serviço não estiver disponível, usa os valores originais (degradação graciosa).
+            double valorFinal = msg.Valor;
+            string tipoFinal  = msg.Tipo;
+
+            if (preProcessClient != null)
+            {
+                try
+                {
+                    var pedido = new DadoBruto
+                    {
+                        SensorId  = sensorId,
+                        Zona      = msg.Zona,
+                        Tipo      = msg.Tipo,
+                        Valor     = msg.Valor,
+                        Unidade   = "",
+                        Timestamp = msg.Timestamp
+                    };
+                    var resultado = await preProcessClient.PreProcessarAsync(pedido);
+
+                    if (resultado.Sucesso)
+                    {
+                        valorFinal = resultado.ValorNormalizado;
+                        tipoFinal  = resultado.Tipo;
+                        Console.WriteLine($"[PRE-PROC] {sensorId}|{msg.Tipo}={msg.Valor:F2} → {tipoFinal}={valorFinal:F2}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[PRE-PROC] {sensorId} rejeitado: {resultado.Erro}");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[PRE-PROC] Serviço indisponível: {ex.Message} — usando valor original.");
+                }
+            }
+
+            string valorStr = valorFinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string resposta = await EnviarParaServidor($"STORE|{sensorId}|{msg.Zona}|{tipoFinal}|{valorStr}");
+            Console.WriteLine($"[DATA] {sensorId}|{tipoFinal}={valorStr} → {resposta}");
+        }
+
+        static void RegistarOuAtualizarSensor(string sensorId, string zona, List<string>? tipos)
+        {
+            lock (sensorLock)
+            {
+                if (!sensores.ContainsKey(sensorId))
+                {
+                    sensores[sensorId] = new SensorInfo
+                    {
+                        Id         = sensorId,
+                        Estado     = "ativo",
+                        Zona       = zona,
+                        TiposDados = tipos ?? new List<string>(),
+                        LastSync   = DateTime.Now
+                    };
+                    Console.WriteLine($"[REGISTER] Novo sensor: {sensorId} ({zona}) tipos={string.Join(",", tipos ?? new())}");
+                }
+                else
+                {
+                    sensores[sensorId].LastSync = DateTime.Now;
+                    if (tipos != null && tipos.Count > 0)
+                        sensores[sensorId].TiposDados = tipos;
+                    Console.WriteLine($"[REGISTER] Sensor atualizado: {sensorId}");
+                }
+            }
+            GuardarSensores(ficheiroCsv);
+        }
+
+        static void AtualizarLastSync(string sensorId)
+        {
+            lock (sensorLock)
+            {
+                if (sensores.ContainsKey(sensorId))
+                    sensores[sensorId].LastSync = DateTime.Now;
             }
         }
 
@@ -347,14 +554,10 @@ namespace Gateway
                 {
                     foreach (var sensor in sensores.Values)
                     {
-                        if (sensor.LastSync.HasValue)
+                        if (sensor.LastSync.HasValue &&
+                            (DateTime.Now - sensor.LastSync.Value).TotalSeconds > 30)
                         {
-                            TimeSpan diferenca = DateTime.Now - sensor.LastSync.Value;
-
-                            if (diferenca.TotalSeconds > 30)
-                            {
-                                Console.WriteLine($"Aviso: o sensor {sensor.Id} pode estar inativo.");
-                            }
+                            Console.WriteLine($"[AVISO] Sensor {sensor.Id} pode estar inativo.");
                         }
                     }
                 }

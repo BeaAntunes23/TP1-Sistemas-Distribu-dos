@@ -24,7 +24,7 @@ namespace SensorApp
 
         // === Configuração do RabbitMQ ===
         private const string RabbitHost = "localhost";
-        private const string ExchangeName = "sensors";  // topic exchange partilhado
+        private const string ExchangeName = "sensores_topic";  // topic exchange partilhado
 
         // === Intervalos (em ms) ===
         private const int IntervaloDados = 3000;       // 3 segundos entre medições
