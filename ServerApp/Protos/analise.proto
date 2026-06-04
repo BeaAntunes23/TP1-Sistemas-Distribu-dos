@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package analise;
+option csharp_namespace = "GrpcAnalise";
+
+service ServicoAnalise {
+  rpc AnalisarDados (PedidoAnalise) returns (ResultadoAnalise);
+}
+
+message PedidoAnalise {
+  string tipo     = 1;
+  string zona     = 2;
+  int32 ultimas_n = 3;
+}
+
+message ResultadoAnalise {
+  bool   sucesso           = 1;
+  string tipo              = 2;
+  string zona              = 3;
+  double media             = 4;
+  double minimo            = 5;
+  double maximo            = 6;
+  double desvio_padrao     = 7;
+  string nivel_risco       = 8;
+  string descricao_risco   = 9;
+  string timestamp_analise = 10;
+  int32  num_medicoes      = 11;
+  string erro              = 12;
+}

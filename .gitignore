@@ -1,0 +1,21 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# SQLite (dados gerados em runtime)
+ServerApp/dados/
+
+# Logs
+*.log
